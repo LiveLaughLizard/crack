@@ -39,6 +39,7 @@ pub enum PickerKind {
     Command,
     Help,
     Mcp,
+    Undo,
 }
 
 pub enum PickerEvent {

@@ -755,6 +755,10 @@ impl CrackView {
                     .py(px(10.))
                     .hover(|d| d.bg(theme::raised_high()))
                     .child(content.child(div().text_color(theme::text()).child(text.clone())))
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.rewind_to(index, window, cx)),
+                    )
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, _, _, cx| this.copy_text(copy.clone(), cx)),
@@ -1270,6 +1274,9 @@ impl Render for CrackView {
             .on_action(cx.listener(|this, _: &CycleEffort, _, cx| this.cycle_effort(cx)))
             .on_action(cx.listener(|this, _: &CycleRecentModel, _, cx| this.cycle_recent_model(cx)))
             .on_action(cx.listener(|this, _: &Interrupt, _, cx| this.interrupt(cx)))
+            .on_action(cx.listener(|this, _: &Undo, window, cx| this.undo(window, cx)))
+            .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
+            .on_action(cx.listener(|this, _: &ShowDiff, _, cx| this.show_session_diff(cx)))
             .on_action(cx.listener(|this, _: &CopyLast, _, cx| this.copy_last(cx)))
             .on_action(cx.listener(|this, _: &PageUp, _, cx| this.scroll_by(1., cx)))
             .on_action(cx.listener(|this, _: &PageDown, _, cx| this.scroll_by(-1., cx)))
@@ -1323,6 +1330,10 @@ impl Render for CrackView {
                             .child(picker.clone()),
                     ),
             );
+        }
+
+        if let Some(view) = &self.diff_view {
+            root = root.child(self.render_diff_view(view, window, cx));
         }
 
         if let Some((dialog, _)) = &self.providers {
@@ -1797,5 +1808,99 @@ impl CrackView {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+impl CrackView {
+    /// The `/diff` viewer: a scrollable, colored unified diff over the transcript.
+    fn render_diff_view(
+        &self,
+        view: &super::undo::DiffView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut body = div().flex().flex_col().font_family(theme::font());
+        for (i, line) in view.lines.iter().enumerate() {
+            let text = if line.is_empty() {
+                SharedString::from(" ")
+            } else {
+                line.clone()
+            };
+            let el = div().id(("diff-line", i)).px(px(12.)).child(text);
+            let el = if line.starts_with("+++")
+                || line.starts_with("---")
+                || line.starts_with("diff --git")
+            {
+                el.text_color(theme::text()).font_weight(FontWeight::BOLD)
+            } else if line.starts_with('+') {
+                el.bg(theme::diff_added_bg())
+                    .text_color(theme::diff_added())
+            } else if line.starts_with('-') {
+                el.bg(theme::diff_removed_bg())
+                    .text_color(theme::diff_removed())
+            } else if line.starts_with("@@") {
+                el.text_color(theme::diff_context())
+            } else {
+                el.text_color(theme::text_soft())
+            };
+            body = body.child(el);
+        }
+        let size = window.viewport_size();
+        div()
+            .id("diff-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(theme::backdrop())
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.diff_view = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .id("diff-frame")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .w(size.width * 0.85)
+                    .h(size.height * 0.8)
+                    .bg(theme::raised())
+                    .border_1()
+                    .border_color(theme::border())
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .px(px(16.))
+                            .py(px(10.))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(theme::text())
+                                    .child(view.title.clone()),
+                            )
+                            .child(div().text_color(theme::muted()).child("esc")),
+                    )
+                    .child(
+                        div()
+                            .id("diff-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&view.scroll)
+                            .text_size(theme::SMALL_SIZE)
+                            .pb(px(12.))
+                            .child(body),
+                    ),
+            )
     }
 }

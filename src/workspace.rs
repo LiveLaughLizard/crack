@@ -130,9 +130,15 @@ impl Workspace {
 
     pub fn tool_context(
         &self,
+        session: &str,
         todos: Arc<Mutex<Vec<Todo>>>,
         allow: Option<Vec<String>>,
     ) -> ToolContext {
+        let snapshots = if self.config.checkpoints.unwrap_or(true) {
+            crate::checkpoint::Snapshots::open(&crate::context::project_root(&self.cwd), session)
+        } else {
+            None
+        };
         ToolContext {
             cwd: self.cwd.clone(),
             mcp: self.mcp.clone(),
@@ -144,6 +150,7 @@ impl Workspace {
             loaded: Arc::new(Mutex::new(
                 self.instructions.iter().map(|i| i.path.clone()).collect(),
             )),
+            checkpoint: Arc::new(crate::checkpoint::Tracker::new(snapshots)),
         }
     }
 

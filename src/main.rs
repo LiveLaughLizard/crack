@@ -4,6 +4,7 @@
 //! `crack run "..."` does one turn headless for scripts and CI.
 
 mod agent;
+mod checkpoint;
 mod config;
 mod context;
 mod headless;

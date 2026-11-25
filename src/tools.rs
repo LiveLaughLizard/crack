@@ -66,6 +66,8 @@ pub struct ToolContext {
     pub sandbox: Option<crate::policy::Sandbox>,
     /// Instruction files already in the system prompt or loaded by `read`.
     pub loaded: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
+    /// Snapshots files before the turn first changes them, for undo.
+    pub checkpoint: Arc<crate::checkpoint::Tracker>,
 }
 
 /// How the interface draws a finished call.
@@ -387,10 +389,16 @@ pub async fn run(name: &str, input: &Value, ctx: &ToolContext, agent: Agent) -> 
         );
     }
     let result = match name {
-        "bash" => bash(input, ctx).await,
+        "bash" | "write" | "edit" => {
+            let tracker = ctx.checkpoint.clone();
+            let _ = tokio::task::spawn_blocking(move || tracker.before_change()).await;
+            match name {
+                "bash" => bash(input, ctx).await,
+                "write" => write(input, ctx).await,
+                _ => edit(input, ctx).await,
+            }
+        }
         "read" => read(input, ctx).await,
-        "write" => write(input, ctx).await,
-        "edit" => edit(input, ctx).await,
         "glob" => glob(input, ctx).await,
         "grep" => grep(input, ctx).await,
         "list" => list(input, ctx).await,
@@ -398,7 +406,12 @@ pub async fn run(name: &str, input: &Value, ctx: &ToolContext, agent: Agent) -> 
         "webfetch" => webfetch(input, ctx).await,
         "todowrite" => todowrite(input, ctx),
         "skill" => skill(input, ctx).await,
-        mcp if mcp.starts_with("mcp__") => run_mcp(mcp, input, ctx, &title).await,
+        mcp if mcp.starts_with("mcp__") => {
+            // MCP servers can change files too.
+            let tracker = ctx.checkpoint.clone();
+            let _ = tokio::task::spawn_blocking(move || tracker.before_change()).await;
+            run_mcp(mcp, input, ctx, &title).await
+        }
         other => Err(anyhow::anyhow!("unknown tool '{other}'")),
     };
     result.unwrap_or_else(|error| ToolOutput::error(format!("Error: {error:#}"), title))
@@ -1066,6 +1079,7 @@ mod tests {
             http: reqwest::Client::new(),
             allow: None,
             loaded: Default::default(),
+            checkpoint: Default::default(),
             mcp: crate::mcp::McpHub::new(Default::default(), reqwest::Client::new()),
             sandbox: None,
         }

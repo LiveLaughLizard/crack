@@ -8,6 +8,7 @@ mod picker;
 mod providers;
 pub mod render;
 mod theme;
+mod undo;
 mod view;
 
 use crate::workspace::{Selection, Workspace};
@@ -28,6 +29,9 @@ actions!(
         SkillPicker,
         Help,
         NewSession,
+        Undo,
+        Redo,
+        ShowDiff,
         ToggleSidebar,
         CycleAgent,
         CycleEffort,
@@ -96,6 +100,9 @@ fn bind_keys(cx: &mut App) {
     let prompt = Some("Prompt");
     cx.bind_keys([
         KeyBinding::new("ctrl-p", CommandPalette, ws),
+        KeyBinding::new("ctrl-x u", Undo, ws),
+        KeyBinding::new("ctrl-x r", Redo, ws),
+        KeyBinding::new("ctrl-x d", ShowDiff, ws),
         KeyBinding::new("ctrl-x p", Providers, ws),
         KeyBinding::new("ctrl-x m", ModelPicker, ws),
         KeyBinding::new("ctrl-x e", EffortPicker, ws),

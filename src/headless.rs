@@ -118,7 +118,7 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
         config.context_tokens = session.context_tokens;
 
         let todos: Arc<Mutex<Vec<Todo>>> = Arc::new(Mutex::new(session.todos.clone()));
-        let tools = workspace.tool_context(todos.clone(), options.tools.clone());
+        let tools = workspace.tool_context(&session.id, todos.clone(), options.tools.clone());
         let (events_tx, mut events) = mpsc::unbounded_channel();
         let (cancel_tx, cancel) = watch::channel(false);
         let history = session.messages.clone();
@@ -170,6 +170,9 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
                         }),
                         AgentEvent::Usage(u) => json!({"type": "usage", "usage": u}),
                         AgentEvent::Notice(t) => json!({"type": "notice", "text": t}),
+                        AgentEvent::Checkpoint { files, .. } => {
+                            json!({"type": "files_changed", "files": files.iter().map(|(s, p)| json!({"status": s.to_string(), "path": p})).collect::<Vec<_>>()})
+                        }
                         AgentEvent::Compacted { before, .. } => {
                             json!({"type": "compacted", "tokens_before": before, "tokens_after": session.context_tokens})
                         }

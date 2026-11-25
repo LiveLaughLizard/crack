@@ -86,6 +86,13 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
         "Compact the conversation: summarize it to free context",
         &["summarize"],
     ),
+    ("undo", "Undo the last turn: conversation and files", &[]),
+    ("redo", "Redo what undo took back", &[]),
+    (
+        "diff",
+        "Show every file change in this session",
+        &["changes"],
+    ),
     ("close", "Close this tab", &["closetab"]),
     ("help", "Keybindings", &[]),
     ("exit", "Quit", &["quit", "q"]),
@@ -132,6 +139,10 @@ pub struct CrackView {
     pub(super) expanded: HashSet<String>,
     md_cache: RefCell<HashMap<u64, Rc<Vec<Block>>>>,
     pub(super) toast: Option<(String, Instant, bool)>,
+    /// The turn (by transcript entry) the undo / rewind picker is about.
+    pub(super) rewind_target: Option<usize>,
+    pub(super) redo: Option<super::undo::Redo>,
+    pub(super) diff_view: Option<super::undo::DiffView>,
     recent_models: Vec<String>,
     pub(super) discovering: bool,
     /// The window title last set; updated when the session or directory changes.
@@ -216,6 +227,9 @@ impl CrackView {
             expanded: HashSet::new(),
             md_cache: RefCell::new(HashMap::new()),
             toast,
+            rewind_target: None,
+            redo: None,
+            diff_view: None,
             recent_models,
             discovering: false,
             window_title: String::new(),
@@ -525,6 +539,9 @@ impl CrackView {
             Some("sandbox") => self.toggle_sandbox(false, cx),
             Some("sandbox-network") => self.toggle_sandbox(true, cx),
             Some("compact") => self.compact_now(cx),
+            Some("undo") => self.undo(window, cx),
+            Some("redo") => self.redo(cx),
+            Some("diff") => self.show_session_diff(cx),
             Some("close") => {
                 let id = self.tab_id;
                 self.close_tab(id, window, cx)
@@ -623,7 +640,9 @@ impl CrackView {
         let mut config = config;
         config.approvals = Some(approvals_tx);
         config.session_rules = self.session_rules.clone();
-        let tools = self.ws.tool_context(self.todos.clone(), None);
+        let tools = self
+            .ws
+            .tool_context(&self.session.id, self.todos.clone(), None);
         let history = self.session.messages.clone();
         crate::runtime::spawn(agent::run_turn(config, history, tools, events_tx, cancel));
         self.running = Some(Running {
@@ -698,6 +717,10 @@ impl CrackView {
     }
 
     pub(super) fn interrupt(&mut self, cx: &mut Context<Self>) {
+        if self.diff_view.take().is_some() {
+            cx.notify();
+            return;
+        }
         if !self.autocomplete.is_empty() {
             self.autocomplete.clear();
             cx.notify();
@@ -816,6 +839,7 @@ impl CrackView {
             PickerKind::Command => ("Commands", self.command_items(), false),
             PickerKind::Help => ("Keybindings", help_items(), false),
             PickerKind::Mcp => ("MCP servers", self.mcp_items(), true),
+            PickerKind::Undo => ("Undo", self.undo_items(), true),
         };
         let search = (kind == PickerKind::Session).then(|| {
             let root = context::project_root(&self.ws.cwd);
@@ -903,6 +927,7 @@ impl CrackView {
                 self.submit_text(format!("/{id}"), window, cx);
             }
             PickerKind::Help => {}
+            PickerKind::Undo => self.confirm_rewind(&id, cx),
             PickerKind::Mcp => {
                 if !id.is_empty() {
                     self.show_toast(format!("Reconnecting {id}…"), false, cx);
@@ -1124,7 +1149,7 @@ impl CrackView {
         let group = |name: &str| match name {
             "new" | "sessions" | "rename" | "copy" | "tab" | "close" => "Session",
             "models" | "effort" | "agents" | "connect" => "Agent",
-            "skills" | "init" | "reload" | "cd" | "compact" => "Project",
+            "skills" | "init" | "reload" | "cd" | "compact" | "undo" | "redo" | "diff" => "Project",
             "yolo" | "accept-edits" | "normal" | "sandbox" | "sandbox-network" => "Safety",
             _ => "System",
         };

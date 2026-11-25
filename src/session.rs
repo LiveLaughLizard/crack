@@ -81,6 +81,19 @@ pub struct Session {
     pub todos: Vec<Todo>,
     #[serde(default)]
     pub model: String,
+    /// File snapshots around each turn that changed files, oldest first.
+    #[serde(skip)]
+    pub checkpoints: Vec<crate::checkpoint::Checkpoint>,
+    /// Where the current turn began: (messages, entries, prompt).
+    #[serde(skip)]
+    turn_start: Option<(usize, usize, String)>,
+    #[serde(skip)]
+    checkpoints_dirty: bool,
+    /// What the running turn changed, until it ends.
+    #[serde(skip)]
+    turn_files: Option<crate::checkpoint::TurnChanges>,
+    #[serde(skip)]
+    turn_compacted: bool,
     /// How many `messages` are already in the database.
     #[serde(skip)]
     saved_messages: usize,
@@ -114,6 +127,11 @@ impl Session {
             model: String::new(),
             saved_messages: 0,
             dirty_from: 0,
+            checkpoints: Vec::new(),
+            turn_start: None,
+            checkpoints_dirty: false,
+            turn_files: None,
+            turn_compacted: false,
         }
     }
 
@@ -140,6 +158,9 @@ impl Session {
         agent: Agent,
         skill: Option<String>,
     ) {
+        self.turn_start = Some((self.messages.len(), self.entries.len(), shown.to_owned()));
+        self.turn_files = None;
+        self.turn_compacted = false;
         if self.messages.is_empty() {
             let title: String = shown
                 .lines()
@@ -262,6 +283,12 @@ impl Session {
             }
             AgentEvent::Compacted { messages, before } => {
                 self.close_thinking();
+                // Earlier turns' places in the history are gone.
+                for checkpoint in &mut self.checkpoints {
+                    checkpoint.compacted = true;
+                }
+                self.checkpoints_dirty = true;
+                self.turn_compacted = true;
                 self.messages = messages.clone();
                 self.saved_messages = 0;
                 self.context_tokens = crate::agent::estimate_tokens(messages);
@@ -274,6 +301,13 @@ impl Session {
                     ),
                 });
             }
+            AgentEvent::Checkpoint {
+                before,
+                after,
+                files,
+            } => {
+                self.turn_files = Some((before.clone(), after.clone(), files.clone()));
+            }
             AgentEvent::Notice(text) => self.entries.push(Entry::Notice { text: text.clone() }),
             AgentEvent::Error(text) => {
                 self.close_thinking();
@@ -284,6 +318,19 @@ impl Session {
                 seconds,
             } => {
                 self.close_thinking();
+                if let Some((messages, entries, prompt)) = self.turn_start.take() {
+                    let (before, after, files) = self.turn_files.take().unwrap_or_default();
+                    self.checkpoints.push(crate::checkpoint::Checkpoint {
+                        messages,
+                        entries,
+                        prompt,
+                        before,
+                        after,
+                        files,
+                        compacted: self.turn_compacted,
+                    });
+                    self.checkpoints_dirty = true;
+                }
                 // Calls that never ran (interrupted) are marked as failed.
                 for (index, entry) in self.entries.iter_mut().enumerate() {
                     if let Entry::Tool { state, .. } = entry
@@ -358,8 +405,42 @@ impl Session {
             entries: self.entries[entries_from..].iter().map(to_json).collect(),
             search_body,
         });
+        if self.checkpoints_dirty {
+            self.checkpoints_dirty = false;
+            store.set_kv(
+                &format!("checkpoints:{}", self.id),
+                serde_json::to_string(&self.checkpoints).unwrap_or_default(),
+            );
+        }
         self.saved_messages = self.messages.len();
         self.dirty_from = self.entries.len();
+    }
+
+    /// Cuts the conversation back to `messages` model messages and `entries`
+    /// transcript entries, dropping checkpoints for turns after that point.
+    pub fn rewind(&mut self, messages: usize, entries: usize) {
+        self.messages.truncate(messages);
+        self.entries.truncate(entries);
+        self.saved_messages = self.saved_messages.min(messages);
+        self.dirty_from = self.dirty_from.min(entries);
+        let before = self.checkpoints.len();
+        self.checkpoints.retain(|c| c.messages < messages);
+        self.checkpoints_dirty |= self.checkpoints.len() != before;
+        self.updated = now();
+    }
+
+    /// Puts back a turn removed by `rewind` (redo).
+    pub fn reapply(
+        &mut self,
+        messages: Vec<Message>,
+        entries: Vec<Entry>,
+        checkpoint: crate::checkpoint::Checkpoint,
+    ) {
+        self.messages.extend(messages);
+        self.entries.extend(entries);
+        self.checkpoints.push(checkpoint);
+        self.checkpoints_dirty = true;
+        self.updated = now();
     }
 
     pub fn load(id: &str) -> anyhow::Result<Session> {
@@ -395,6 +476,14 @@ impl Session {
             context_tokens: row.context_tokens.max(0) as u64,
             todos: serde_json::from_str(&row.todos).unwrap_or_default(),
             model: row.model,
+            checkpoints: store
+                .kv(&format!("checkpoints:{id}"))
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or_default(),
+            turn_start: None,
+            checkpoints_dirty: false,
+            turn_files: None,
+            turn_compacted: false,
         })
     }
 

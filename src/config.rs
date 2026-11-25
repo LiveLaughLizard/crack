@@ -30,6 +30,8 @@ pub struct Config {
     pub models: BTreeMap<String, crate::providers::models::ModelCaps>,
     /// Compact the conversation when it fills this share of the context window (0.8).
     pub compact_at: Option<f64>,
+    /// Snapshot files around each turn for undo (default true).
+    pub checkpoints: Option<bool>,
     /// MCP servers, keyed by name: `command` + `args` (stdio) or `url` (HTTP).
     pub mcp: BTreeMap<String, crate::mcp::McpServerConfig>,
     /// Provider settings, keyed by provider id. Ids that match a built-in provider
@@ -172,6 +174,9 @@ impl Config {
         self.models.extend(layer.models);
         if layer.compact_at.is_some() {
             self.compact_at = layer.compact_at;
+        }
+        if layer.checkpoints.is_some() {
+            self.checkpoints = layer.checkpoints;
         }
         // Project rules add to global ones; settings override.
         let p = layer.permissions;

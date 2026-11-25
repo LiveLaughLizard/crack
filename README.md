@@ -193,6 +193,26 @@ tab to switch to it. Close it with its ×, a middle-click or `ctrl-x w`; closing
 running tab stops its turn. Opening a session that's already in a tab switches to that
 tab.
 
+## Undo, redo and rewinding
+
+Before a turn first changes anything, crack snapshots the project's files, and it
+snapshots them again when the turn ends. Changes made by `edit`, `write`, shell commands
+and MCP tools are all covered. Snapshots live in a private git store under crack's data
+folder, separate from your repository: they respect `.gitignore`, store each version
+once, and never touch your `.git`.
+
+- **`/undo`** (`ctrl-x u`) takes back the last turn. You choose conversation and files,
+  conversation only, or files only, and see which files will be restored. Your prompt
+  goes back in the input box.
+- **`/redo`** (`ctrl-x r`) puts it back.
+- **Click any message of yours** to rewind to just before it, with the same choices.
+- **`/diff`** (`ctrl-x d`) shows everything this session changed, as a colored diff.
+
+Restoring never overwrites your own work. If you changed a file after crack did,
+crack leaves it alone and shows you the diff. Snapshots need `git` on PATH; set
+`checkpoints = false` to turn them off. `crack run --format json` reports a
+`files_changed` event per turn.
+
 ## Built-in ripgrep
 
 The `grep` tool uses ripgrep's own search engine, so searches respect `.gitignore`,

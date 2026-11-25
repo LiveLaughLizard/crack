@@ -41,6 +41,12 @@ pub enum AgentEvent {
         id: String,
         reason: String,
     },
+    /// The turn changed files: the snapshots on either side.
+    Checkpoint {
+        before: String,
+        after: String,
+        files: Vec<(char, String)>,
+    },
     /// The history was replaced by a summary to make room.
     Compacted {
         messages: Vec<Message>,
@@ -136,6 +142,17 @@ pub async fn run_turn(
                 }));
             }
         }
+    }
+    // Even an interrupted turn records what it changed, so it can be undone.
+    let tracker = tools.checkpoint.clone();
+    if let Ok(Some((before, after, files))) =
+        tokio::task::spawn_blocking(move || tracker.finish()).await
+    {
+        let _ = events.send(AgentEvent::Checkpoint {
+            before,
+            after,
+            files,
+        });
     }
     let _ = events.send(AgentEvent::Done {
         interrupted,
