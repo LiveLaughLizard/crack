@@ -180,6 +180,8 @@ impl Config {
                 provider.api_key = Some(key);
             }
         }
+        // Enabled plugins add skills, and (once approved) hooks and MCP servers.
+        crate::plugins::apply(&mut config);
         Ok(config)
     }
 

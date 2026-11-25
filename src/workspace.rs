@@ -17,6 +17,8 @@ pub struct Workspace {
     pub config: Config,
     pub registry: Registry,
     pub skills: Arc<Vec<Skill>>,
+    /// Custom and plugin slash commands, for suggestions.
+    pub commands: Arc<Vec<crate::commands::Command>>,
     pub instructions: Vec<Instruction>,
     pub http: reqwest::Client,
     /// MCP servers; connect them with `mcp.connect_all()`.
@@ -40,6 +42,7 @@ impl Workspace {
         let config = Config::load(&cwd)?;
         let registry = Registry::load(&config);
         let skills = Arc::new(skills::discover(&cwd, &config));
+        let commands = Arc::new(crate::commands::discover(&cwd));
         let instructions = context::instructions(&cwd, &config);
         let http = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(20))
@@ -50,6 +53,7 @@ impl Workspace {
             config,
             registry,
             skills,
+            commands,
             instructions,
             http,
             mcp,
@@ -64,6 +68,7 @@ impl Workspace {
             self.http.clone(),
         );
         self.skills = Arc::new(skills::discover(&self.cwd, &self.config));
+        self.commands = Arc::new(crate::commands::discover(&self.cwd));
         self.instructions = context::instructions(&self.cwd, &self.config);
     }
 
@@ -176,7 +181,7 @@ impl Workspace {
     }
 
     pub fn skill(&self, name: &str) -> Option<&Skill> {
-        self.skills.iter().find(|s| s.name == name)
+        skills::find(&self.skills, name)
     }
 
     /// Expands `/skill-name rest of request` into the skill's instructions plus the

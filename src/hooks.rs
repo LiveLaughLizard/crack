@@ -33,6 +33,18 @@ pub const EVENTS: &[&str] = &[
     "Notification",
 ];
 
+/// Claude Code events crack doesn't raise. Plugins often register them; they're skipped
+/// quietly instead of warned about.
+const IGNORED_EVENTS: &[&str] = &[
+    "SessionEnd",
+    "SubagentStart",
+    "PostToolUseFailure",
+    "PermissionRequest",
+    "PostCompact",
+    "Setup",
+    "StopFailure",
+];
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct HookCommand {
@@ -53,6 +65,11 @@ pub struct HookMatcher {
     /// Set when it came from a project's config rather than the user's own.
     #[serde(skip)]
     pub from_project: bool,
+    /// Set for a plugin's hooks: its name and environment (`CLAUDE_PLUGIN_ROOT`...).
+    #[serde(skip)]
+    pub plugin: Option<String>,
+    #[serde(skip)]
+    pub env: Vec<(String, String)>,
 }
 
 pub type HooksConfig = BTreeMap<String, Vec<HookMatcher>>;
@@ -65,6 +82,7 @@ struct Hook {
     command: String,
     timeout: Duration,
     from_project: bool,
+    env: Vec<(String, String)>,
 }
 
 /// What the hooks for one event decided.
@@ -106,6 +124,11 @@ impl Hooks {
         let mut hooks = Vec::new();
         for (event, matchers) in config {
             if !EVENTS.contains(&event.as_str()) {
+                if IGNORED_EVENTS.contains(&event.as_str())
+                    || matchers.iter().all(|m| m.plugin.is_some())
+                {
+                    continue;
+                }
                 eprintln!(
                     "crack: unknown hook event '{event}' (known: {})",
                     EVENTS.join(", ")
@@ -117,7 +140,7 @@ impl Hooks {
                     .matcher
                     .as_deref()
                     .filter(|p| !p.is_empty() && *p != "*")
-                    .and_then(|p| match regex::Regex::new(&format!("^(?:{p})$")) {
+                    .and_then(|p| match regex::Regex::new(&matcher_regex(p)) {
                         Ok(r) => Some(r),
                         Err(error) => {
                             eprintln!("crack: hook matcher '{p}' isn't a valid regex: {error}");
@@ -137,6 +160,7 @@ impl Hooks {
                         command,
                         timeout: Duration::from_secs(timeout.unwrap_or(60)),
                         from_project: m.from_project,
+                        env: m.env.clone(),
                     });
                 }
             }
@@ -191,7 +215,10 @@ impl Hooks {
             object.insert("session_id".into(), json!(self.session));
             object.insert("cwd".into(), json!(self.cwd.display().to_string()));
             object.insert("transcript_path".into(), json!(""));
-            if let Some(tool) = &claude_tool {
+            // For other events the matcher subject is e.g. how the session started.
+            if let Some(tool) = &claude_tool
+                && matches!(event, "PreToolUse" | "PostToolUse")
+            {
                 object.insert("tool_name".into(), json!(tool));
             }
         }
@@ -212,6 +239,26 @@ impl Hooks {
     }
 }
 
+/// Claude Code's matcher rules: a pattern of only letters, digits, `_`, `-`, spaces,
+/// commas and `|` is a list of exact names; anything else is a regex that may match
+/// anywhere in the name.
+fn matcher_regex(pattern: &str) -> String {
+    let simple = pattern
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ' ' | ',' | '|'));
+    if simple {
+        let names: Vec<String> = pattern
+            .split(['|', ','])
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(regex::escape)
+            .collect();
+        format!("^(?:{})$", names.join("|"))
+    } else {
+        pattern.to_owned()
+    }
+}
+
 async fn run_one(hook: &Hook, cwd: &Path, input: &str) -> anyhow::Result<(i32, String, String)> {
     use tokio::io::AsyncWriteExt;
     let mut child = tokio::process::Command::new("bash")
@@ -220,6 +267,7 @@ async fn run_one(hook: &Hook, cwd: &Path, input: &str) -> anyhow::Result<(i32, S
         .env("CRACK_PROJECT_DIR", cwd)
         .env("CLAUDE_PROJECT_DIR", cwd)
         .env("CRACK", "1")
+        .envs(hook.env.iter().map(|(k, v)| (k, v)))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -451,6 +499,47 @@ mod tests {
         let mut hooks = Hooks::new(&config, &std::env::temp_dir(), "test");
         hooks.project_trusted = true;
         hooks
+    }
+
+    #[test]
+    fn matchers_follow_claude_code_rules() {
+        let exact = regex::Regex::new(&matcher_regex("Edit|Write")).unwrap();
+        assert!(exact.is_match("Edit") && !exact.is_match("MultiEdit"));
+        let list = regex::Regex::new(&matcher_regex("startup, clear")).unwrap();
+        assert!(list.is_match("clear") && !list.is_match("resume"));
+        // Anything else is a regex that may match anywhere.
+        let pattern = regex::Regex::new(&matcher_regex("mcp__.*")).unwrap();
+        assert!(pattern.is_match("mcp__github__issue"));
+    }
+
+    #[tokio::test]
+    async fn plugin_hooks_get_their_env_and_session_start_matches_the_source() {
+        let mut config = config(
+            r#"
+            [[hooks.SessionStart]]
+            matcher = "startup|clear|compact"
+            command = 'echo "root=$CLAUDE_PLUGIN_ROOT"'
+            "#,
+        );
+        // Events crack doesn't raise are skipped quietly for plugins.
+        config.insert("SessionEnd".into(), config["SessionStart"].clone());
+        for m in config.values_mut().flatten() {
+            m.plugin = Some("demo@market".into());
+            m.env = vec![("CLAUDE_PLUGIN_ROOT".into(), "/plugins/demo".into())];
+        }
+        let h = Hooks::new(&config, &std::env::temp_dir(), "test");
+        let start = h
+            .run(
+                "SessionStart",
+                Some("startup"),
+                json!({"source": "startup"}),
+            )
+            .await;
+        assert_eq!(start.context, vec!["root=/plugins/demo".to_owned()]);
+        let resume = h
+            .run("SessionStart", Some("resume"), json!({"source": "resume"}))
+            .await;
+        assert!(resume.context.is_empty());
     }
 
     #[tokio::test]

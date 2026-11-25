@@ -654,9 +654,9 @@ install with one click. Nothing is installed until you pick it.
 
 | id | What | License |
 |---|---|---|
-| `caveman` | Terse replies that cut output tokens ([JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman)) | Apache-2.0 |
-| `ponytail` | Write less code; reuse what exists ([DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail)) | MIT |
-| `superpowers` | Brainstorm, plan, test first, debug, verify ([obra/superpowers](https://github.com/obra/superpowers)) | MIT |
+| `caveman` | Plugin: terse replies that cut output tokens ([JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman)) | Apache-2.0 |
+| `ponytail` | Plugin: write less code; reuse what exists ([DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail)) | MIT |
+| `superpowers` | Plugin: brainstorm, plan, test first, debug, verify ([obra/superpowers](https://github.com/obra/superpowers)) | MIT |
 | `frontend-design` | Distinctive web interfaces ([anthropics/skills](https://github.com/anthropics/skills)) | Apache-2.0 |
 | `anthropic-skills` | All of Anthropic's public skills ([anthropics/skills](https://github.com/anthropics/skills)) | Apache-2.0 |
 | `mattpocock` | Engineering and productivity skills ([mattpocock/skills](https://github.com/mattpocock/skills)) | MIT |
@@ -671,10 +671,40 @@ crack extensions update ponytail      # latest version
 crack extensions remove ponytail
 ```
 
-Skill packs are downloaded from their own repositories when you install them (crack
+Plugins install through their own marketplace (see [Plugins](#plugins)), so their
+hooks and commands come too. Skill packs are downloaded from their own repositories when you install them (crack
 doesn't bundle them) into `~/.config/crack/skills/<id>`, with the project's license
 file. MCP servers are added to your config as `[mcp.<id>]`. Skills are instructions
 the model follows, written by third parties: read them before relying on them.
+
+## Plugins
+
+crack installs Claude Code plugins: skills, slash commands, subagents, hooks and MCP
+servers, from any marketplace (a repository with `.claude-plugin/marketplace.json`).
+
+```
+crack plugin marketplace add obra/superpowers     # owner/repo, a git URL or a folder
+crack plugin list
+crack plugin install superpowers                 # name, or name@marketplace
+crack plugin update|disable|enable|remove superpowers
+crack plugin trust superpowers                   # allow its hooks after reviewing them
+```
+
+In the window, `/extensions` lists every marketplace's plugins, and `/plugin ...` takes
+the same commands. A plugin's hooks and MCP servers run code on your machine, so crack
+shows exactly what they run and asks first. Until you allow them, and again after an
+update changes them, they stay off while the plugin's skills, commands and agents work.
+Hooks get `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` as in Claude Code. Plugins
+live in `~/.config/crack/plugins`.
+
+## Custom commands
+
+Markdown files in `.crack/commands/` or `.claude/commands/` (in the project) and
+`~/.config/crack/commands/` or `~/.claude/commands/` become slash commands. The body
+is the prompt, with `$ARGUMENTS` for everything after the command and `$1`, `$2`... for
+single words; frontmatter can set `description` and `argument-hint`. Subfolders add
+`:` segments (`commands/db/migrate.md` is `/db:migrate`), and plugin commands are
+`/plugin:name` (or just `/name` when nothing else uses it).
 
 ## Instructions and skills
 

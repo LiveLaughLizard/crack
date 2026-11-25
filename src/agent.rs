@@ -231,7 +231,11 @@ pub(crate) async fn turn_loop(
     if history.len() == 1 {
         let outcome = config
             .hooks
-            .run("SessionStart", None, json!({"source": "startup"}))
+            .run(
+                "SessionStart",
+                Some("startup"),
+                json!({"source": "startup"}),
+            )
             .await;
         notify(events, &outcome.notices);
         added.extend(outcome.context);
@@ -249,6 +253,10 @@ pub(crate) async fn turn_loop(
     // `@server:uri` resources and a `/server:prompt` the user typed.
     if !ctx.mcp.is_empty() {
         added.extend(ctx.mcp.expand_prompt(&prompt).await);
+    }
+    // A custom or plugin `/command`.
+    if let Some(text) = crate::commands::expand(&prompt, &ctx.cwd) {
+        added.push(text);
     }
     // `@path` mentions attach files.
     added.extend(tools::expand_file_mentions(&prompt, &ctx.cwd));
@@ -305,7 +313,7 @@ pub(crate) async fn turn_loop(
         {
             let outcome = config
                 .hooks
-                .run("PreCompact", None, json!({"trigger": "auto"}))
+                .run("PreCompact", Some("auto"), json!({"trigger": "auto"}))
                 .await;
             notify(events, &outcome.notices);
             match compact(config, history, &specs, &client).await {

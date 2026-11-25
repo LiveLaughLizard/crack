@@ -128,6 +128,16 @@ pub fn discover(cwd: &Path) -> Vec<AgentDef> {
     if let Some(config) = crate::config::global_dir() {
         dirs.push(config.join("agents"));
     }
+    // Enabled plugins' agents, after the user's own.
+    for plugin in crate::plugins::enabled() {
+        dirs.extend(
+            plugin
+                .components
+                .agent_paths
+                .into_iter()
+                .filter(|p| p.is_dir()),
+        );
+    }
     let mut defs: Vec<AgentDef> = Vec::new();
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else {

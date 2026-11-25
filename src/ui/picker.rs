@@ -45,6 +45,7 @@ pub enum PickerKind {
     MemoryAction,
     Extensions,
     ExtensionAction,
+    PluginApproval,
     Recover,
     Settings,
     SettingsValue,

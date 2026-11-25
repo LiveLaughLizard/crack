@@ -1162,7 +1162,7 @@ pub fn render_todos(todos: &[Todo]) -> String {
 
 async fn skill(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
     let name = str_arg(input, "name").ok_or_else(|| anyhow::anyhow!("missing name"))?;
-    let skill = ctx.skills.iter().find(|s| s.name == name).ok_or_else(|| {
+    let skill = crate::skills::find(&ctx.skills, name).ok_or_else(|| {
         let names: Vec<&str> = ctx.skills.iter().map(|s| s.name.as_str()).collect();
         anyhow::anyhow!("no skill named '{name}'. Available: {}", names.join(", "))
     })?;

@@ -15,6 +15,9 @@ pub enum Source {
         repo: &'static str,
         paths: &'static [&'static str],
     },
+    /// A Claude Code plugin: its repository is added as a marketplace and the plugin
+    /// with the entry's id is installed from it (skills, commands, agents, hooks).
+    Plugin { repo: &'static str },
     /// An MCP server added to the user's config.
     Mcp {
         url: Option<&'static str>,
@@ -36,6 +39,7 @@ impl Entry {
     pub fn kind(&self) -> &'static str {
         match self.source {
             Source::Skills { .. } => "skills",
+            Source::Plugin { .. } => "plugin",
             Source::Mcp { .. } => "MCP server",
         }
     }
@@ -50,9 +54,8 @@ pub const CATALOG: &[Entry] = &[
         description: "Terse, caveman-style replies that cut output tokens; plus terse commits and reviews.",
         license: "Apache-2.0",
         homepage: "https://github.com/JuliusBrussee/caveman",
-        source: Source::Skills {
+        source: Source::Plugin {
             repo: "JuliusBrussee/caveman",
-            paths: &["skills"],
         },
     },
     Entry {
@@ -62,9 +65,8 @@ pub const CATALOG: &[Entry] = &[
         description: "Write less code: reuse what exists, the standard library and the platform first.",
         license: "MIT",
         homepage: "https://github.com/DietrichGebert/ponytail",
-        source: Source::Skills {
+        source: Source::Plugin {
             repo: "DietrichGebert/ponytail",
-            paths: &["skills"],
         },
     },
     Entry {
@@ -74,9 +76,8 @@ pub const CATALOG: &[Entry] = &[
         description: "A development method: brainstorm, plan, test first, debug systematically, verify.",
         license: "MIT",
         homepage: "https://github.com/obra/superpowers",
-        source: Source::Skills {
+        source: Source::Plugin {
             repo: "obra/superpowers",
-            paths: &["skills"],
         },
     },
     Entry {
@@ -177,10 +178,24 @@ pub enum Status {
         skills: Vec<String>,
     },
     Mcp,
+    /// Installed as a plugin (`name@marketplace`).
+    Plugin {
+        key: String,
+        version: String,
+        enabled: bool,
+    },
 }
 
 pub fn status(entry: &Entry, config: &crate::config::Config) -> Status {
     match entry.source {
+        Source::Plugin { repo } => match installed_plugin(entry.id, repo) {
+            Some((key, p)) => Status::Plugin {
+                key,
+                version: p.version,
+                enabled: p.enabled,
+            },
+            None => Status::NotInstalled,
+        },
         Source::Mcp { .. } => {
             if config.mcp.contains_key(entry.id) {
                 Status::Mcp
@@ -222,11 +237,22 @@ pub fn install(entry: &Entry) -> anyhow::Result<String> {
             ))
         }
         Source::Skills { repo, paths } => install_skills(entry, repo, paths),
+        Source::Plugin { .. } => {
+            anyhow::bail!(
+                "{} is a plugin: install it with plugin_spec and the plugin flow",
+                entry.id
+            )
+        }
     }
 }
 
 pub fn remove(entry: &Entry) -> anyhow::Result<String> {
     match entry.source {
+        Source::Plugin { repo } => {
+            let (key, _) = installed_plugin(entry.id, repo)
+                .ok_or_else(|| anyhow::anyhow!("{} isn't installed", entry.name))?;
+            crate::plugins::uninstall(&key)
+        }
         Source::Mcp { .. } => {
             crate::config::remove_user_mcp(entry.id)?;
             Ok(format!("Removed the {} MCP server.", entry.name))
@@ -245,6 +271,40 @@ pub fn remove(entry: &Entry) -> anyhow::Result<String> {
     }
 }
 
+/// The installed plugin for a catalog entry, if any: `(name@marketplace, details)`.
+fn installed_plugin(id: &str, repo: &str) -> Option<(String, crate::plugins::Installed)> {
+    let state = crate::plugins::State::load();
+    state.plugins.iter().find_map(|(key, plugin)| {
+        let (name, market) = key.split_once('@')?;
+        (name == id
+            && state
+                .marketplaces
+                .get(market)
+                .is_some_and(|m| m.source == repo))
+        .then(|| (key.clone(), plugin.clone()))
+    })
+}
+
+/// Adds a plugin entry's repository as a marketplace; returns `name@marketplace` to
+/// install. Blocking (git).
+pub fn plugin_spec(entry: &Entry) -> anyhow::Result<String> {
+    let Source::Plugin { repo } = entry.source else {
+        anyhow::bail!("{} isn't a plugin", entry.id);
+    };
+    let market = crate::plugins::add_marketplace(repo)?;
+    Ok(format!("{}@{market}", entry.id))
+}
+
+/// After a plugin install: drop the skills-only copy an older crack put in
+/// `skills/<id>`, so its skills don't appear twice.
+pub fn retire_skill_pack(id: &str) {
+    if let Ok(dir) = pack_dir(id)
+        && dir.join(MANIFEST).is_file()
+    {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// A scratch folder removed when dropped.
 struct Scratch(PathBuf);
 
@@ -254,7 +314,7 @@ impl Drop for Scratch {
     }
 }
 
-fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> anyhow::Result<String> {
     let output = std::process::Command::new("git")
         .current_dir(dir)
         // Never prompt for credentials; check symlinks out as plain files.
@@ -335,7 +395,7 @@ fn install_skills(entry: &Entry, repo: &str, paths: &[&str]) -> anyhow::Result<S
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            copy_tree(&dir, &staging.join(&name), &mut 0)?;
+            copy_tree(&dir, &staging.join(&name), &mut 0, 50 << 20)?;
             names.push(name);
         }
     }
@@ -377,8 +437,8 @@ fn install_skills(entry: &Entry, repo: &str, paths: &[&str]) -> anyhow::Result<S
     ))
 }
 
-/// Copies regular files and folders (no symlinks), up to 50 MB in all.
-fn copy_tree(from: &Path, to: &Path, total: &mut u64) -> anyhow::Result<()> {
+/// Copies regular files and folders (no symlinks, no `.git`), up to `limit` bytes in all.
+pub(crate) fn copy_tree(from: &Path, to: &Path, total: &mut u64, limit: u64) -> anyhow::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)?.flatten() {
         let kind = entry.file_type()?;
@@ -387,13 +447,10 @@ fn copy_tree(from: &Path, to: &Path, total: &mut u64) -> anyhow::Result<()> {
             continue;
         }
         if kind.is_dir() {
-            copy_tree(&entry.path(), &to.join(&name), total)?;
+            copy_tree(&entry.path(), &to.join(&name), total, limit)?;
         } else if kind.is_file() {
             *total += entry.metadata()?.len();
-            anyhow::ensure!(
-                *total < 50 << 20,
-                "the skills are over 50 MB; not installing"
-            );
+            anyhow::ensure!(*total < limit, "over {} MB; not installing", limit >> 20);
             std::fs::copy(entry.path(), to.join(&name))?;
         }
     }
@@ -407,6 +464,14 @@ pub fn report(config: &crate::config::Config) -> String {
         let state = match status(entry, config) {
             Status::NotInstalled => String::new(),
             Status::Mcp => "  [installed]".into(),
+            Status::Plugin {
+                key,
+                version,
+                enabled,
+            } => format!(
+                "  [installed: {key} {version}{}]",
+                if enabled { "" } else { ", disabled" }
+            ),
             Status::Skills { commit, skills } => format!(
                 "  [installed: {} skills @ {}]",
                 skills.len(),

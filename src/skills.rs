@@ -180,6 +180,15 @@ fn walk_for_skills(dir: &Path, depth: usize) -> Vec<PathBuf> {
     found
 }
 
+/// Finds a skill by name. Plugins written for Claude Code name their skills
+/// `plugin:skill`; without an exact match, the part after the last `:` is tried.
+pub fn find<'a>(skills: &'a [Skill], name: &str) -> Option<&'a Skill> {
+    skills.iter().find(|s| s.name == name).or_else(|| {
+        let short = name.rsplit_once(':')?.1;
+        skills.iter().find(|s| s.name == short)
+    })
+}
+
 pub fn discover(cwd: &Path, config: &Config) -> Vec<Skill> {
     let mut skills = Vec::new();
     let root = project_root(cwd);

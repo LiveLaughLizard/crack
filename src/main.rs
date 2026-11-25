@@ -7,6 +7,7 @@ mod agent;
 mod catalog;
 mod checkpoint;
 mod code_index;
+mod commands;
 mod config;
 mod context;
 mod delegate;
@@ -19,6 +20,7 @@ mod logging;
 mod lsp;
 mod mcp;
 mod memory;
+mod plugins;
 mod policy;
 mod providers;
 mod recovery;
@@ -86,6 +88,9 @@ enum Mode {
     },
     Extensions {
         common: Common,
+        args: Vec<String>,
+    },
+    Plugin {
         args: Vec<String>,
     },
     Usage {
@@ -170,6 +175,7 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
     let mcp_mode = mode.clone();
     let hooks_mode = mode.clone();
     let extensions_mode = mode.clone();
+    let plugin_mode = mode.clone();
     let usage_mode = mode.clone();
     let doctor_mode = mode.clone();
     let completion_mode = mode.clone();
@@ -354,6 +360,18 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                         &mcp_mode,
                         Mode::Mcp {
                             common: common(ctx)?,
+                            args: ctx.args().to_vec(),
+                        },
+                    );
+                    Ok(())
+                })
+                .build(),
+            CommandBuilder::new("plugin")
+                .short("Claude Code plugins: `crack plugin marketplace add <repo>`, `install <name>`, `list`")
+                .run(move |ctx| {
+                    set(
+                        &plugin_mode,
+                        Mode::Plugin {
                             args: ctx.args().to_vec(),
                         },
                     );
@@ -731,6 +749,7 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
             );
             Ok(0)
         }
+        Mode::Plugin { args } => Ok(plugin_command(&args)),
         Mode::Extensions { common, args } => {
             let (workspace, _) = load_workspace(&common)?;
             match (args.first().map(String::as_str), args.get(1)) {
@@ -743,6 +762,21 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
                         eprintln!("No extension '{id}'; `crack extensions` lists them.");
                         return Ok(1);
                     };
+                    if action != "remove" && matches!(entry.source, catalog::Source::Plugin { .. })
+                    {
+                        let spec = match catalog::plugin_spec(entry) {
+                            Ok(spec) => spec,
+                            Err(error) => {
+                                eprintln!("Couldn't add {}: {error:#}", entry.name);
+                                return Ok(1);
+                            }
+                        };
+                        let code = plugin_command(&["install".to_owned(), spec]);
+                        if code == 0 {
+                            catalog::retire_skill_pack(entry.id);
+                        }
+                        return Ok(code);
+                    }
                     let result = if action == "remove" {
                         catalog::remove(entry)
                     } else {
@@ -818,6 +852,79 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
                 println!("{}  {when}  {}", s.id, s.title);
             }
             Ok(0)
+        }
+    }
+}
+
+/// `crack plugin ...`. Returns the exit code.
+fn plugin_command(args: &[String]) -> i32 {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let yes = args.contains(&"--yes") || args.contains(&"-y");
+    let args: Vec<&str> = args
+        .into_iter()
+        .filter(|a| *a != "--yes" && *a != "-y")
+        .collect();
+    let result: anyhow::Result<String> = match args.as_slice() {
+        [] | ["list"] => Ok(plugins::report()),
+        ["marketplace", "add", source] => {
+            plugins::add_marketplace(source).map(|name| format!("Added the {name} marketplace."))
+        }
+        ["marketplace", "update", name] => {
+            plugins::update_marketplace(name).map(|_| format!("Updated {name}."))
+        }
+        ["marketplace", "remove", name] => {
+            plugins::remove_marketplace(name).map(|_| format!("Removed {name}."))
+        }
+        ["install" | "update", spec] => (|| {
+            let pending = plugins::prepare(spec)?;
+            let mut approved = yes;
+            if pending.review.runs_code() && !yes {
+                println!(
+                    "{} {} runs these on your machine:\n{}",
+                    pending.key,
+                    pending.version,
+                    pending.review.describe()
+                );
+                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    print!("Allow them? [y/N] ");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    let mut answer = String::new();
+                    let _ = std::io::stdin().read_line(&mut answer);
+                    approved = matches!(answer.trim(), "y" | "Y" | "yes");
+                }
+            }
+            let runs_code = pending.review.runs_code();
+            let key = pending.key.clone();
+            let mut message = plugins::commit_install(pending, approved)?;
+            if runs_code && !approved {
+                message.push_str(&format!(
+                    " Its hooks and MCP servers stay off until you run `crack plugin trust {key}`."
+                ));
+            }
+            Ok(message)
+        })(),
+        ["remove" | "uninstall", spec] => plugins::uninstall(spec),
+        ["enable", spec] => plugins::set_enabled(spec, true),
+        ["disable", spec] => plugins::set_enabled(spec, false),
+        ["trust", spec] => plugins::trust(spec).map(|review| {
+            if review.runs_code() {
+                format!("Approved these for {spec}:\n{}", review.describe())
+            } else {
+                format!("{spec} runs no hooks or MCP servers.")
+            }
+        }),
+        _ => Err(anyhow::anyhow!(
+            "usage: crack plugin [list | marketplace add|update|remove <source> | install|update|remove|enable|disable|trust <name>[@marketplace]] [--yes]"
+        )),
+    };
+    match result {
+        Ok(message) => {
+            println!("{}", message.trim_end());
+            0
+        }
+        Err(error) => {
+            eprintln!("{error:#}");
+            1
         }
     }
 }

@@ -97,8 +97,13 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
     ),
     (
         "extensions",
-        "Extensions: install popular skill packs and MCP servers",
+        "Extensions: skill packs, plugins and MCP servers",
         &["plugins", "marketplace", "install"],
+    ),
+    (
+        "plugin",
+        "Plugins: /plugin marketplace add <repo>, /plugin install <name>",
+        &[],
     ),
     (
         "settings",
@@ -191,7 +196,8 @@ pub struct CrackView {
     pub(super) pending_install: Option<(String, String)>,
     /// The memory the action picker is about.
     pub(super) memory_target: Option<i64>,
-    pub(super) extension_target: Option<&'static str>,
+    pub(super) extension_target: Option<String>,
+    pub(super) plugin_approval: Option<super::extensions::PluginApproval>,
     /// Sessions whose last turn crack didn't finish: (id, title).
     pub(super) interrupted: Vec<(String, String)>,
     /// Project files for `@` suggestions, and when they were listed.
@@ -292,6 +298,7 @@ impl CrackView {
             pending_install: None,
             memory_target: None,
             extension_target: None,
+            plugin_approval: None,
             interrupted: Vec::new(),
             file_cache: None,
             attachments: Vec::new(),
@@ -616,6 +623,19 @@ impl CrackView {
                     });
                 }
             }
+            for command in self.ws.commands.iter() {
+                if command.name.to_lowercase().contains(&query) {
+                    let hint = command.argument_hint.clone().unwrap_or_default();
+                    self.autocomplete.push(SlashItem {
+                        name: command.name.clone(),
+                        description: format!("command \u{b7} {hint} {}", command.description)
+                            .replace("  ", " "),
+                        skill: true,
+                        label: format!("/{}", command.name),
+                        insert: format!("/{} ", command.name),
+                    });
+                }
+            }
             for prompt in self.ws.mcp.prompts() {
                 let command = prompt.command();
                 if command.to_lowercase().contains(&query) {
@@ -832,6 +852,7 @@ impl CrackView {
             Some("diff") => self.show_session_diff(cx),
             Some("memory") => self.open_picker(PickerKind::Memory, window, cx),
             Some("extensions") => self.open_picker(PickerKind::Extensions, window, cx),
+            Some("plugin") => self.plugin_slash(args, window, cx),
             Some("settings") => self.open_picker(PickerKind::Settings, window, cx),
             Some("usage") => {
                 let project = crate::memory::project_key(&self.ws.cwd);
@@ -1190,6 +1211,11 @@ impl CrackView {
             PickerKind::MemoryAction => ("Memory", self.memory_action_items(), true),
             PickerKind::Extensions => ("Extensions", self.extension_items(), true),
             PickerKind::ExtensionAction => ("Extensions", self.extension_action_items(), false),
+            PickerKind::PluginApproval => (
+                "This plugin runs code on your machine",
+                self.plugin_approval_items(),
+                false,
+            ),
             PickerKind::Recover => (
                 "crack closed before these finished",
                 self.recover_items(),
@@ -1292,7 +1318,8 @@ impl CrackView {
             PickerKind::Memory => self.open_memory(&id, window, cx),
             PickerKind::MemoryAction => self.memory_action(&id, window, cx),
             PickerKind::Extensions => self.open_extension(&id, window, cx),
-            PickerKind::ExtensionAction => self.extension_action(&id, cx),
+            PickerKind::ExtensionAction => self.extension_action(&id, window, cx),
+            PickerKind::PluginApproval => self.plugin_approval_choice(&id, cx),
             PickerKind::Recover => self.recover(&id, window, cx),
             PickerKind::Settings => self.open_setting(&id, window, cx),
             PickerKind::SettingsValue => self.apply_setting(&id, window, cx),
@@ -1533,7 +1560,7 @@ impl CrackView {
             "models" | "effort" | "agents" | "connect" => "Agent",
             "skills" | "init" | "reload" | "cd" | "compact" | "undo" | "redo" | "diff"
             | "trust-hooks" | "commit" | "memory" | "remember" | "export-memory" | "usage"
-            | "extensions" => "Project",
+            | "extensions" | "plugin" => "Project",
             "yolo" | "accept-edits" | "normal" | "sandbox" | "sandbox-network" => "Safety",
             _ => "System",
         };
