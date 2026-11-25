@@ -1081,11 +1081,10 @@ impl CrackView {
             thousands(usage.input_tokens + usage.cache_write_tokens),
             thousands(usage.output_tokens),
             thousands(usage.cache_read_tokens),
-            if input > 0 {
-                format!(" ({}%)", usage.cache_read_tokens * 100 / input)
-            } else {
-                String::new()
-            }
+            (usage.cache_read_tokens * 100)
+                .checked_div(input)
+                .map(|p| format!(" ({p}%)"))
+                .unwrap_or_default()
         ));
         // From the usage log: every request at its own model's price, subagents included.
         if self.session.cost > 0.0 {
