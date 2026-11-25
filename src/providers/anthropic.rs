@@ -348,6 +348,7 @@ impl AnthropicEndpoint {
     ) -> anyhow::Result<Completion> {
         let url = self.url(request.model);
         let body = serde_json::to_vec(&self.body(&request))?;
+        super::dump_request(&body);
         let mut betas: Vec<&str> = Vec::new();
         if self.first_party() {
             if supports_fallbacks(request.model) {

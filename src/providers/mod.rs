@@ -402,3 +402,20 @@ mod tests {
         );
     }
 }
+
+/// With `CRACK_DUMP_REQUESTS=<folder>`, saves every request body there as numbered
+/// JSON files: the way to see why a provider's prompt cache misses (compare two
+/// consecutive requests; everything before the newest message should be identical).
+pub fn dump_request(body: &[u8]) {
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let Some(dir) = std::env::var_os("CRACK_DUMP_REQUESTS") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(
+        dir.join(format!("{}-{n:03}.json", std::process::id())),
+        body,
+    );
+}

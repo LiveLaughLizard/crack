@@ -104,6 +104,13 @@ pub fn run(workspace: &mut Workspace, selection: &Selection) -> i32 {
         None => r.fail("default model", "none: pick one with -m provider/model"),
     }
 
+    for model in crate::usage::get().never_cached() {
+        r.warn(
+            "prompt cache",
+            format!("{model} never read from the cache this week; its provider may not be caching, so every request pays full price"),
+        );
+    }
+
     println!("\nSafety");
     let sandbox = crate::policy::Sandbox::resolve(&workspace.config.permissions);
     if !sandbox.wanted {

@@ -1075,11 +1075,17 @@ impl CrackView {
             context_section = context_section.child(format!("{}% used", tokens * 100 / window));
         }
         let usage = self.session.usage;
+        let input = usage.input_tokens + usage.cache_write_tokens + usage.cache_read_tokens;
         context_section = context_section.child(format!(
-            "in {} · out {} · cached {}",
+            "in {} · out {} · cached {}{}",
             thousands(usage.input_tokens + usage.cache_write_tokens),
             thousands(usage.output_tokens),
-            thousands(usage.cache_read_tokens)
+            thousands(usage.cache_read_tokens),
+            if input > 0 {
+                format!(" ({}%)", usage.cache_read_tokens * 100 / input)
+            } else {
+                String::new()
+            }
         ));
         // From the usage log: every request at its own model's price, subagents included.
         if self.session.cost > 0.0 {

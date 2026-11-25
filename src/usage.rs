@@ -28,6 +28,8 @@ pub struct Total {
     pub requests: u64,
     pub input: u64,
     pub output: u64,
+    /// Input tokens read from the prompt cache (part of `input`).
+    pub cached: u64,
     pub cost: f64,
     /// Requests whose price wasn't known.
     pub unpriced: u64,
@@ -74,6 +76,25 @@ impl UsageLog {
         );
     }
 
+    /// Models with sessions of 5+ requests in the last week that never read from the
+    /// prompt cache: a sign the provider isn't caching for crack.
+    pub fn never_cached(&self) -> Vec<String> {
+        let since = chrono::Utc::now().timestamp() - 7 * 86_400;
+        let db = self.db();
+        let Ok(mut statement) = db.prepare(
+            "SELECT model FROM (
+                 SELECT model, session, COUNT(*) AS n, SUM(cache_read) AS hits
+                 FROM usage_log WHERE at >= ?1 GROUP BY model, session)
+             GROUP BY model HAVING MAX(n) >= 5 AND SUM(hits) = 0 ORDER BY model",
+        ) else {
+            return Vec::new();
+        };
+        statement
+            .query_map(params![since], |r| r.get(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
     /// What a session (and its subagents, logged under it) has cost so far.
     pub fn session_cost(&self, session: &str) -> f64 {
         self.db()
@@ -101,7 +122,7 @@ impl UsageLog {
         let db = self.db();
         let mut statement = db.prepare(&format!(
             "SELECT {key}, COUNT(*), SUM(input + cache_read + cache_write), SUM(output), COALESCE(SUM(cost), 0),
-                    SUM(cost IS NULL)
+                    SUM(cost IS NULL), SUM(cache_read)
              FROM usage_log WHERE at >= ?1 AND (?2 IS NULL OR project = ?2)
              GROUP BY 1 ORDER BY 5 DESC, 1"
         ))?;
@@ -113,6 +134,7 @@ impl UsageLog {
                 output: r.get::<_, i64>(3)? as u64,
                 cost: r.get(4)?,
                 unpriced: r.get::<_, i64>(5)? as u64,
+                cached: r.get::<_, Option<i64>>(6)?.unwrap_or(0) as u64,
             })
         })?;
         Ok(rows.flatten().collect())
@@ -140,10 +162,11 @@ pub fn report(days: i64, project: Option<&str>) -> String {
             format!("${:>7.2}", t.cost)
         };
         format!(
-            "{:<34} {:>6} req  {:>11} in  {:>10} out  {cost}",
+            "{:<34} {:>6} req  {:>11} in  {:>4} cached  {:>10} out  {cost}",
             t.label,
             t.requests,
             crate::ui::render::thousands(t.input),
+            format!("{}%", (t.cached * 100).checked_div(t.input).unwrap_or(0)),
             crate::ui::render::thousands(t.output)
         )
     };
@@ -196,6 +219,12 @@ mod tests {
         assert_eq!(by_model[0].requests, 2);
         assert_eq!(by_model[1].unpriced, 1);
         assert_eq!(log.totals(0, "model", Some("/q")).unwrap().len(), 1);
+        // s1 has 2 requests: too few to judge. Five uncached requests are flagged.
+        assert!(log.never_cached().is_empty());
+        for _ in 0..5 {
+            log.record("s3", "/p", "zai/glm", &usage, None);
+        }
+        assert_eq!(log.never_cached(), vec!["zai/glm".to_owned()]);
         let _ = std::fs::remove_file(path);
     }
 }

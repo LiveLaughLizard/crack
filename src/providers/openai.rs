@@ -219,6 +219,7 @@ impl OpenAiEndpoint {
     ) -> anyhow::Result<Completion> {
         let url = self.url("chat/completions");
         let body = serde_json::to_vec(&self.body(&request))?;
+        super::dump_request(&body);
         let response = super::send_with_retry(|| async {
             let builder = client
                 .post(&url)
