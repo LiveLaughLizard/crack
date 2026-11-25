@@ -30,6 +30,11 @@ pub struct Config {
     pub models: BTreeMap<String, crate::providers::models::ModelCaps>,
     /// Compact the conversation when it fills this share of the context window (0.8).
     pub compact_at: Option<f64>,
+    /// Trim old tool output when the conversation fills this share of the context window
+    /// (0.6). Set it at or above `compact_at` to turn trimming off.
+    pub trim_at: Option<f64>,
+    /// How many recent tool results trimming leaves whole (6).
+    pub trim_keep: Option<usize>,
     /// On Claude (Anthropic's own API), let the server write the compaction summary
     /// (beta). Off by default.
     pub server_compaction: Option<bool>,
@@ -201,6 +206,12 @@ impl Config {
         self.models.extend(layer.models);
         if layer.compact_at.is_some() {
             self.compact_at = layer.compact_at;
+        }
+        if layer.trim_at.is_some() {
+            self.trim_at = layer.trim_at;
+        }
+        if layer.trim_keep.is_some() {
+            self.trim_keep = layer.trim_keep;
         }
         if layer.server_compaction.is_some() {
             self.server_compaction = layer.server_compaction;

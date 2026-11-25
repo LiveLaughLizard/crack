@@ -309,6 +309,23 @@ impl Session {
                     ),
                 });
             }
+            AgentEvent::Trimmed {
+                messages,
+                outputs,
+                freed,
+            } => {
+                // Same messages in the same places: rewinding still works.
+                self.messages = messages.clone();
+                self.saved_messages = 0;
+                self.context_tokens = self.context_tokens.saturating_sub(*freed);
+                self.updated = now();
+                self.entries.push(Entry::Notice {
+                    text: format!(
+                        "Trimmed {outputs} old tool output(s), about {} tokens. The calls stay; the model can run them again.",
+                        crate::ui::render::thousands(*freed)
+                    ),
+                });
+            }
             AgentEvent::SubagentStatus { id, text } => {
                 if let Some(Entry::Tool { meta, state, .. }) = self.tool_entry(id)
                     && matches!(state, ToolState::Running | ToolState::Pending)

@@ -267,9 +267,17 @@ tab.
 
 ## Long conversations
 
-When a conversation fills 80% of the model's context window, crack summarizes it and
-carries on from the summary; `/compact` does it by hand. Set the threshold with
-`compact_at = 0.7` in the config. Models crack doesn't know need their window set:
+At 60% of the model's context window, crack trims old tool output: all but the six most
+recent results become a one-line note, while the calls themselves stay, so the model
+knows what it ran and can run it again. Trimming happens in batches, so the prompt cache
+is rewritten once per batch rather than on every turn. At 80%, crack summarizes the
+conversation and carries on from the summary; `/compact` does that by hand.
+
+```toml
+trim_at = 0.6      # set it to compact_at or higher to turn trimming off
+trim_keep = 6      # recent tool results left whole
+compact_at = 0.8
+``` Models crack doesn't know need their window set:
 `[models."provider/model"] context = 131072`.
 
 On Claude through Anthropic's own API, two beta features can help (both off by

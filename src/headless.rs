@@ -255,6 +255,9 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
                         AgentEvent::Compacted { before, .. } => {
                             json!({"type": "compacted", "tokens_before": before, "tokens_after": session.context_tokens})
                         }
+                        AgentEvent::Trimmed { outputs, freed, .. } => {
+                            json!({"type": "trimmed", "outputs": outputs, "tokens_freed": freed})
+                        }
                         AgentEvent::Error(t) => {
                             failed = true;
                             json!({"type": "error", "text": t})

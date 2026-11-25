@@ -137,6 +137,8 @@ impl Workspace {
             approvals: None,
             context_window: self.registry.caps(&model_ref).context,
             compact_at: self.config.compact_at.unwrap_or(0.8).clamp(0.3, 0.95),
+            trim_at: self.config.trim_at.unwrap_or(0.6).clamp(0.2, 1.0),
+            trim_keep: self.config.trim_keep.unwrap_or(6),
             server_compaction: self.config.server_compaction.unwrap_or(false),
             clear_tool_results: self.config.clear_tool_results.unwrap_or(false),
             context_tokens: 0,

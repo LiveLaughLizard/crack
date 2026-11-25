@@ -65,6 +65,12 @@ pub enum AgentEvent {
         messages: Vec<Message>,
         before: u64,
     },
+    /// Old tool output was replaced with short notes to make room.
+    Trimmed {
+        messages: Vec<Message>,
+        outputs: usize,
+        freed: u64,
+    },
     Error(String),
     Done {
         interrupted: bool,
@@ -100,6 +106,10 @@ pub struct TurnConfig {
     pub context_window: Option<u64>,
     /// Compact when the context passes this share of the window.
     pub compact_at: f64,
+    /// Trim old tool output when the context passes this share of the window.
+    pub trim_at: f64,
+    /// How many recent tool results trimming leaves whole.
+    pub trim_keep: usize,
     /// Use Claude's server-side compaction when the endpoint offers it.
     pub server_compaction: bool,
     /// Let Claude clear old tool results (context editing) when the endpoint offers it.
@@ -210,6 +220,8 @@ pub(crate) async fn turn_loop(
     let mut steps = 0;
     let mut context = config.context_tokens;
     let mut compact_failed = false;
+    // After a trim that freed too little, wait for the context to grow before retrying.
+    let mut trim_retry_at = 0u64;
     let mut just_compacted = false;
     let mut stop_continuations = 0;
 
@@ -262,6 +274,29 @@ pub(crate) async fn turn_loop(
     }
 
     loop {
+        // Trim old tool output first: it keeps the conversation itself, and one trim
+        // costs one prompt-cache rewrite, so it runs in batches well before compacting.
+        // Skipped when Claude clears old tool results itself.
+        if let Some(window) = config.context_window
+            && config.trim_at < config.compact_at
+            && context as f64 > window as f64 * config.trim_at
+            && context >= trim_retry_at
+            && !(config.clear_tool_results && config.endpoint.is_first_party_claude())
+        {
+            let claude = matches!(config.endpoint, crate::providers::Endpoint::Anthropic(_));
+            match trim_tool_output(history, config.trim_keep, claude) {
+                Some((trimmed, outputs, freed)) if freed >= window / 20 => {
+                    let _ = events.send(AgentEvent::Trimmed {
+                        messages: trimmed.clone(),
+                        outputs,
+                        freed,
+                    });
+                    *history = trimmed;
+                    context = context.saturating_sub(freed);
+                }
+                _ => trim_retry_at = context + window / 20,
+            }
+        }
         // Make room before the conversation outgrows the context window.
         if let Some(window) = config.context_window
             && context as f64 > window as f64 * config.compact_at
@@ -819,4 +854,137 @@ fn record_usage(config: &TurnConfig, ctx: &ToolContext, usage: &Usage, events: &
     let project = crate::memory::project_key(&ctx.cwd);
     crate::usage::get().record(&ctx.session_id, &project, &config.model_ref, usage, cost);
     let _ = events.send(AgentEvent::Cost(cost.unwrap_or(0.0)));
+}
+
+/// How a trimmed tool result starts, so it isn't trimmed twice.
+const TRIM_MARK: &str = "[Output trimmed to save context:";
+/// Output shorter than this stays: trimming it saves next to nothing.
+const TRIM_MIN_CHARS: usize = 600;
+
+/// Replaces the output of every tool result but the `keep` most recent with a short
+/// note, keeping the calls themselves (observation masking). Returns the new history,
+/// how many outputs were trimmed and roughly how many tokens that frees, or `None` when
+/// nothing is worth trimming.
+///
+/// `drop_thinking` removes thinking from the assistant turns before the last trimmed
+/// result: Claude's signed thinking is tied to the exact conversation before it, which
+/// trimming changes.
+pub fn trim_tool_output(
+    history: &[Message],
+    keep: usize,
+    drop_thinking: bool,
+) -> Option<(Vec<Message>, usize, u64)> {
+    let results: Vec<(usize, usize)> = history
+        .iter()
+        .enumerate()
+        .flat_map(|(m, message)| {
+            message
+                .parts
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| matches!(p, Part::ToolResult { .. }))
+                .map(move |(p, _)| (m, p))
+        })
+        .collect();
+    let old = results.len().checked_sub(keep).filter(|n| *n > 0)?;
+    let mut out = history.to_vec();
+    let mut trimmed = 0;
+    let mut freed = 0u64;
+    let mut last = None;
+    for &(m, p) in &results[..old] {
+        if let Part::ToolResult { content, .. } = &mut out[m].parts[p]
+            && content.len() >= TRIM_MIN_CHARS
+            && !content.starts_with(TRIM_MARK)
+        {
+            let note = format!(
+                "{TRIM_MARK} {} lines, {} characters. Run the tool again if you need it.]",
+                content.lines().count(),
+                content.len()
+            );
+            freed += (content.len() - note.len()) as u64 / 4;
+            *content = note;
+            trimmed += 1;
+            last = Some(m);
+        }
+    }
+    let last = last?;
+    if drop_thinking {
+        for message in out[..last].iter_mut().filter(|m| m.role == Role::Assistant) {
+            message
+                .parts
+                .retain(|p| !matches!(p, Part::Thinking { .. }));
+        }
+    }
+    Some((out, trimmed, freed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A conversation of `n` tool calls, each with `size` characters of output.
+    fn calls(n: usize, size: usize) -> Vec<Message> {
+        let mut history = vec![Message::user_text("go")];
+        for i in 0..n {
+            history.push(Message {
+                role: Role::Assistant,
+                parts: vec![
+                    Part::Thinking {
+                        text: "hmm".into(),
+                        signature: Some("sig".into()),
+                        redacted: None,
+                    },
+                    Part::ToolUse {
+                        id: format!("t{i}"),
+                        name: "bash".into(),
+                        input: json!({"command": "cat log"}),
+                    },
+                ],
+            });
+            history.push(Message {
+                role: Role::User,
+                parts: vec![Part::ToolResult {
+                    id: format!("t{i}"),
+                    content: "line\n".repeat(size / 5),
+                    is_error: false,
+                }],
+            });
+        }
+        history
+    }
+
+    fn content(message: &Message) -> &str {
+        match &message.parts[0] {
+            Part::ToolResult { content, .. } => content,
+            _ => panic!("not a tool result"),
+        }
+    }
+
+    #[test]
+    fn trims_all_but_the_newest_results_and_keeps_the_calls() {
+        let history = calls(10, 5_000);
+        let (trimmed, outputs, freed) = trim_tool_output(&history, 6, false).unwrap();
+        assert_eq!(outputs, 4);
+        assert!(freed > 4 * 1_000);
+        assert_eq!(trimmed.len(), history.len());
+        // Results 0-3 are notes; 4-9 are whole.
+        assert!(content(&trimmed[2]).starts_with(TRIM_MARK));
+        assert!(content(&trimmed[8]).starts_with(TRIM_MARK));
+        assert_eq!(content(&trimmed[10]), content(&history[10]));
+        // The calls stay.
+        assert!(matches!(trimmed[1].parts[1], Part::ToolUse { .. }));
+        // Trimming again finds nothing new.
+        assert!(trim_tool_output(&trimmed, 6, false).is_none());
+    }
+
+    #[test]
+    fn leaves_short_output_and_drops_claude_thinking_only_before_the_cut() {
+        assert!(trim_tool_output(&calls(10, 100), 6, false).is_none());
+        let (trimmed, _, _) = trim_tool_output(&calls(10, 5_000), 6, true).unwrap();
+        let thinking = |m: &Message| m.parts.iter().any(|p| matches!(p, Part::Thinking { .. }));
+        // The last trimmed result is message 8; thinking before it goes, after it stays.
+        assert!(!thinking(&trimmed[7]));
+        assert!(thinking(&trimmed[9]));
+        assert!(thinking(&trimmed[19]));
+    }
 }
