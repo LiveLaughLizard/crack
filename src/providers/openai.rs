@@ -376,8 +376,13 @@ async fn read_stream(
             return Err(anyhow!("{message}"));
         }
         if let Some(u) = json.get("usage").filter(|u| u.is_object()) {
+            // Providers name cache hits differently: OpenAI, Z.ai, Qwen and OpenRouter use
+            // prompt_tokens_details.cached_tokens, DeepSeek prompt_cache_hit_tokens,
+            // Kimi a top-level cached_tokens.
             let cached = u["prompt_tokens_details"]["cached_tokens"]
                 .as_u64()
+                .or_else(|| u["prompt_cache_hit_tokens"].as_u64())
+                .or_else(|| u["cached_tokens"].as_u64())
                 .unwrap_or(0);
             usage.input_tokens = u["prompt_tokens"]
                 .as_u64()
@@ -681,5 +686,40 @@ mod tests {
         assert_eq!(out[0]["role"], "tool");
         assert_eq!(out[0]["tool_call_id"], "c1");
         assert_eq!(out[1]["role"], "user");
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    async fn usage_from(usage: Value) -> Usage {
+        let chunks = [
+            json!({"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]}),
+            json!({"choices": [], "usage": usage}),
+        ];
+        let body: String = chunks
+            .iter()
+            .map(|c| format!("data: {c}\n\n"))
+            .chain(std::iter::once("data: [DONE]\n\n".to_owned()))
+            .collect();
+        let response = reqwest::Response::from(http::Response::new(body));
+        let mut sink = |_| {};
+        read_stream(response, &mut sink).await.unwrap().usage
+    }
+
+    #[tokio::test]
+    async fn reads_cache_hits_in_every_providers_format() {
+        for usage in [
+            // OpenAI, Z.ai, Qwen, OpenRouter
+            json!({"prompt_tokens": 1000, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 800}}),
+            // DeepSeek
+            json!({"prompt_tokens": 1000, "completion_tokens": 5, "prompt_cache_hit_tokens": 800, "prompt_cache_miss_tokens": 200}),
+            // Kimi
+            json!({"prompt_tokens": 1000, "completion_tokens": 5, "cached_tokens": 800}),
+        ] {
+            let u = usage_from(usage.clone()).await;
+            assert_eq!((u.cache_read_tokens, u.input_tokens), (800, 200), "{usage}");
+        }
     }
 }
