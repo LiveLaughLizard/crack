@@ -109,6 +109,15 @@ impl Workspace {
         Ok(TurnConfig {
             endpoint: provider.endpoint.clone(),
             hooks: crate::hooks::Hooks::new(&self.config.hooks, &self.cwd, ""),
+            subagents: Some(std::sync::Arc::new(crate::delegate::SubagentEnv::new(
+                self.registry.clone(),
+                &self.cwd,
+                model_ref.to_owned(),
+                self.config.subagent_model.clone(),
+                self.instructions.clone(),
+                self.config.max_parallel_agents.unwrap_or(4),
+                self.config.subagent_max_steps.unwrap_or(60),
+            ))),
             model,
             system,
             effort: selection.effort,

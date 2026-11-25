@@ -680,6 +680,10 @@ impl CrackView {
     // ---- Turns ----
 
     fn start_turn(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.session.id.starts_with("sub-") {
+            self.show_toast("This is a subagent's transcript, so it's read-only. Open a new tab (ctrl-x t) to keep working.", true, cx);
+            return;
+        }
         // The model may have been picked before discovery finished.
         let config = match self.ws.turn_config(&self.selection) {
             Ok(mut config) => {
@@ -1495,6 +1499,30 @@ impl CrackView {
     }
 
     /// Opens an empty tab after the current one and switches to it.
+    /// Opens a subagent's stored transcript in a tab (read-only).
+    pub(super) fn open_transcript(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tab_with_session(&id) {
+            self.switch_tab(tab, window, cx);
+            return;
+        }
+        match Session::load(&id) {
+            Ok(session) => {
+                self.new_tab(window, cx);
+                self.session = session;
+                self.follow = true;
+                cx.notify();
+            }
+            Err(error) => {
+                self.show_toast(format!("Couldn't open the transcript: {error}"), true, cx)
+            }
+        }
+    }
+
     pub(super) fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_tab_id;
         self.next_tab_id += 1;

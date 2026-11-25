@@ -106,7 +106,12 @@ async fn handle(socket: &mut tokio::net::TcpStream) -> anyhow::Result<()> {
 }
 
 enum Plan {
-    Call { name: String, input: Value },
+    Call {
+        name: String,
+        input: Value,
+    },
+    /// Several calls in one response (`parallel: N <prompt>` starts N subagents).
+    Calls(Vec<(String, Value)>),
     Answer(String),
 }
 
@@ -132,6 +137,21 @@ fn plan(last_user_text: Option<&str>, tool_result: Option<&str>) -> Plan {
     }
     if text.starts_with("This conversation was compacted") {
         return Plan::Answer("Picking up from the summary.".into());
+    }
+    if let Some(i) = text.find("parallel:") {
+        let rest = text[i + 9..].trim();
+        let (n, prompt) = rest
+            .split_once(' ')
+            .unwrap_or((rest, "explore the project"));
+        let n: usize = n.parse().unwrap_or(2);
+        return Plan::Calls(
+            (1..=n)
+                .map(|k| {
+                    let input = json!({"description": format!("area {k}"), "prompt": format!("{prompt} (part {k})"), "subagent_type": "explore"});
+                    ("task".to_owned(), input)
+                })
+                .collect(),
+        );
     }
     // "call: <tool> <json args>" calls any tool, e.g. an MCP one.
     if let Some(i) = text.find("call:") {
@@ -177,6 +197,20 @@ fn openai(request: &Value) -> Vec<String> {
         Value::Null,
     )];
     match plan {
+        Plan::Calls(calls) => {
+            out.push(chunk(
+                json!({"content": "Splitting this up. "}),
+                Value::Null,
+            ));
+            for (index, (name, input)) in calls.into_iter().enumerate() {
+                out.push(chunk(
+                    json!({"tool_calls": [{"index": index, "id": format!("call_{index}"), "type": "function",
+                        "function": {"name": name, "arguments": input.to_string()}}]}),
+                    Value::Null,
+                ));
+            }
+            out.push(chunk(json!({}), json!("tool_calls")));
+        }
         Plan::Call { name, input } => {
             out.push(chunk(json!({"content": "I'll check that. "}), Value::Null));
             out.push(chunk(
@@ -247,6 +281,18 @@ fn anthropic(request: &Value) -> Vec<String> {
         ),
     ];
     let stop = match plan {
+        Plan::Calls(calls) => {
+            for (k, (name, input)) in calls.into_iter().enumerate() {
+                let index = k + 1;
+                out.push(event("content_block_start", json!({"type": "content_block_start", "index": index, "content_block": {"type": "tool_use", "id": format!("toolu_{index}"), "name": name, "input": {}}})));
+                out.push(event("content_block_delta", json!({"type": "content_block_delta", "index": index, "delta": {"type": "input_json_delta", "partial_json": input.to_string()}})));
+                out.push(event(
+                    "content_block_stop",
+                    json!({"type": "content_block_stop", "index": index}),
+                ));
+            }
+            "tool_use"
+        }
         Plan::Call { name, input } => {
             out.push(event("content_block_start", json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "toolu_1", "name": name, "input": {}}})));
             let args = input.to_string();

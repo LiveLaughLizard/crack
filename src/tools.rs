@@ -90,6 +90,9 @@ pub struct ToolMeta {
     /// Body of a block display: shell output, a diff, written content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// A subagent's stored transcript (session id), opened by clicking the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 pub struct ToolOutput {
@@ -112,7 +115,7 @@ impl ToolOutput {
         }
     }
 
-    fn error(content: impl Into<String>, title: String) -> Self {
+    pub fn error(content: impl Into<String>, title: String) -> Self {
         Self {
             content: content.into(),
             is_error: true,
@@ -350,6 +353,14 @@ pub fn title(name: &str, input: &Value) -> String {
         "read" => format!("Read {}", arg("path")),
         "write" => format!("Write {}", arg("path")),
         "edit" => format!("Edit {}", arg("path")),
+        "task" => format!(
+            "Task: {} ({})",
+            arg("description"),
+            input["subagent_type"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("general")
+        ),
         "git_status" => "git status".into(),
         "git_diff" => format!("git diff {}", arg("path")).trim_end().to_owned(),
         "git_log" => format!("git log {}", arg("path")).trim_end().to_owned(),
@@ -451,6 +462,20 @@ fn floor_char(text: &str, mut index: usize) -> usize {
     index
 }
 
+/// Kills a shell command's whole process group when dropped (interrupted or timed out).
+struct KillGroup(Option<u32>);
+
+impl Drop for KillGroup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0 {
+            unsafe {
+                libc::killpg(pid as i32, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 /// PATH for shell commands: the user's, plus the built-in `rg` when ripgrep isn't installed.
 fn shell_path() -> std::ffi::OsString {
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -496,7 +521,10 @@ async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         .env("GIT_PAGER", "cat")
         .env("PAGER", "cat")
         .kill_on_drop(true)
+        // Its own process group, so an interrupted command's children stop too.
+        .process_group(0)
         .spawn()?;
+    let mut group = KillGroup(child.id());
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
     let collect = async {
@@ -515,6 +543,8 @@ async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         match tokio::time::timeout(Duration::from_secs(timeout), collect).await {
             Ok(result) => {
                 let (out, err, status) = result?;
+                // Finished: leave anything it started in the background alone.
+                group.0 = None;
                 let mut text = String::from_utf8_lossy(&out).into_owned();
                 let err = String::from_utf8_lossy(&err);
                 if !err.trim().is_empty() {
@@ -543,6 +573,7 @@ async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
             kind: DisplayKind::Shell,
             title: format!("$ {command}"),
             detail: Some(content.clone()),
+            link: None,
         },
         content,
     })
@@ -634,6 +665,7 @@ async fn write(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
             kind: DisplayKind::Write,
             title: format!("Wrote {shown}"),
             detail: Some(truncate_middle(content, 8_000)),
+            link: None,
         },
     ))
 }
@@ -701,6 +733,7 @@ async fn edit(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
             kind: DisplayKind::Diff,
             title,
             detail: Some(truncate_middle(&diff, 12_000)),
+            link: None,
         },
     ))
 }
@@ -983,6 +1016,7 @@ fn todowrite(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
             kind: DisplayKind::Todos,
             title: "Todos".into(),
             detail: Some(rendered),
+            link: None,
         },
     ))
 }

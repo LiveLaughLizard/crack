@@ -610,6 +610,35 @@ impl CrackView {
                                 .child(meta.title.clone()),
                         ),
                 );
+            // A running subagent's live status; a finished one links to its transcript.
+            if running
+                && name == "task"
+                && let Some(status) = &meta.detail
+            {
+                row = row.child(
+                    div()
+                        .pl(px(30.))
+                        .text_size(theme::SMALL_SIZE)
+                        .truncate()
+                        .child(status.clone()),
+                );
+            }
+            if !running && let Some(link) = meta.link.clone() {
+                return row
+                    .child(
+                        div()
+                            .pl(px(30.))
+                            .text_size(theme::SMALL_SIZE)
+                            .text_color(theme::secondary())
+                            .child("open transcript \u{203a}"),
+                    )
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(theme::text()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_transcript(link.clone(), window, cx)
+                    }))
+                    .into_any_element();
+            }
             if failed && let Some(detail) = &meta.detail {
                 let shown: String = if expanded {
                     detail.clone()

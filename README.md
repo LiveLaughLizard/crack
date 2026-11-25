@@ -231,6 +231,47 @@ The sidebar shows the branch, commits ahead and behind, and the number of change
 message in the same style. The commit itself always waits for you on the approval card,
 even in YOLO mode, and it never happens in headless runs.
 
+## Subagents
+
+The model can hand a self-contained job to a subagent with the `task` tool. A subagent
+starts with a fresh context, its own instructions, tools and model, and returns one
+report, so the main conversation stays small. Several `task` calls in one reply run at
+the same time (`max_parallel_agents`, default 4).
+
+**Built-in agents:**
+- **`explore`:** read-only codebase search. It uses a smaller, faster model from the
+  same provider (Haiku for Claude, a mini or flash model elsewhere), unless you set
+  `subagent_model`.
+- **`general`:** can do anything the main agent can, except start subagents.
+
+**Your own agents** are markdown files in `.crack/agents/`, `.claude/agents/` or
+`~/.config/crack/agents/`. Claude Code's agent files work as they are:
+
+```markdown
+---
+name: reviewer
+description: Reviews a diff for bugs. Use after making changes.
+tools: Read, Grep, Glob, git_diff
+model: haiku            # inherit (default), haiku/sonnet/opus, or provider/model
+isolation: worktree     # optional: edit in a separate git worktree
+---
+You are a careful reviewer...
+```
+
+**In the transcript,** each subagent shows a live status line, and once finished it
+links to its full transcript, which opens read-only in a tab.
+
+**Isolation.** An agent with `isolation: worktree` edits in a temporary git worktree
+that starts from your current files. Its changes come back as a patch to review and
+apply, so parallel agents can't overwrite each other or your work.
+
+**Limits:**
+- Subagents ask for approval through the same card as the main agent.
+- They can't start subagents of their own.
+- Each one stops after `subagent_max_steps` model requests (default 60).
+- Their tokens count toward the session's cost.
+- Interrupting the turn stops them and cleans up their worktrees.
+
 ## Hooks
 
 Hooks run your commands at points in a turn. They use Claude Code's format and contract,

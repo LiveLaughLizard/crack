@@ -47,6 +47,13 @@ pub enum AgentEvent {
         after: String,
         files: Vec<(char, String)>,
     },
+    /// What a running subagent is doing, for its `task` call's status line.
+    SubagentStatus {
+        id: String,
+        text: String,
+    },
+    /// Tokens a subagent used: counted in the session's cost, not its context.
+    SubagentUsage(Usage),
     /// A UserPromptSubmit hook blocked the prompt; take it back out.
     PromptBlocked(String),
     /// Hooks added context to the user's message.
@@ -81,6 +88,8 @@ pub struct TurnConfig {
     pub session_rules: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Where to ask for approval; `None` (headless) refuses what would need it.
     pub approvals: Option<mpsc::UnboundedSender<ApprovalRequest>>,
+    /// Lets the model start subagents (`task`); `None` inside a subagent.
+    pub subagents: Option<std::sync::Arc<crate::delegate::SubagentEnv>>,
     /// The model's context window, when known; compaction needs it.
     pub context_window: Option<u64>,
     /// Compact when the context passes this share of the window.
@@ -166,14 +175,22 @@ pub async fn run_turn(
     });
 }
 
-async fn turn_loop(
+pub(crate) async fn turn_loop(
     config: &TurnConfig,
     history: &mut Vec<Message>,
     ctx: &ToolContext,
     events: &Events,
 ) -> anyhow::Result<()> {
     let client = ctx.http.clone();
-    let specs = tools::specs(config.agent, ctx);
+    let mut specs = tools::specs(config.agent, ctx);
+    if let Some(env) = &config.subagents
+        && ctx
+            .allow
+            .as_ref()
+            .is_none_or(|a| a.iter().any(|t| t == "task"))
+    {
+        specs.push(env.spec(config.agent));
+    }
     let mut steps = 0;
     let mut context = config.context_tokens;
     let mut compact_failed = false;
@@ -363,7 +380,16 @@ async fn turn_loop(
         }
 
         let mut stop_after_tools = false;
-        let mut results = Vec::new();
+        // 1. In order: announce each call, run its PreToolUse hooks, get permission.
+        struct Prepared {
+            id: String,
+            name: String,
+            input: Value,
+            blocked: bool,
+            stop: Option<String>,
+            outcome: Option<tools::ToolOutput>,
+        }
+        let mut prepared = Vec::new();
         for (id, name, input) in calls {
             let _ = events.send(AgentEvent::ToolCall {
                 id: id.clone(),
@@ -384,40 +410,99 @@ async fn turn_loop(
             if let Some(updated) = &pre.updated_input {
                 input = crate::hooks::crack_input(updated);
             }
-            let blocked = pre.block.is_some();
-            let mut output = if let Some(reason) = pre.block {
-                tools::ToolOutput::refused(
+            let (blocked, outcome) = if let Some(reason) = pre.block {
+                let refused = tools::ToolOutput::refused(
                     format!("Blocked by a hook: {reason}"),
                     tools::title(&name, &input),
-                )
+                );
+                (true, Some(refused))
             } else {
                 match permit(config, &id, &name, &input, events, pre.permission).await {
-                    Ok(()) => tools::run(&name, &input, ctx, config.agent).await,
-                    Err(refusal) => refusal,
+                    Ok(()) => (false, None),
+                    Err(refusal) => (false, Some(refusal)),
                 }
             };
+            prepared.push(Prepared {
+                id,
+                name,
+                input,
+                blocked,
+                stop: pre.stop,
+                outcome,
+            });
+        }
+
+        // 2. Run them: subagents all at once (up to the limit), other tools in order.
+        let tasks = futures::future::join_all(
+            prepared
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.outcome.is_none() && p.name == "task")
+                .map(|(i, p)| async move {
+                    let output = match &config.subagents {
+                        Some(env) => {
+                            crate::delegate::run(config, env, ctx, &p.id, &p.input, events).await
+                        }
+                        None => tools::ToolOutput::error(
+                            "Subagents can't start subagents of their own.",
+                            tools::title(&p.name, &p.input),
+                        ),
+                    };
+                    (i, output)
+                }),
+        );
+        let others = async {
+            let mut done = Vec::new();
+            for (i, p) in prepared
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.outcome.is_none() && p.name != "task")
+            {
+                done.push((i, tools::run(&p.name, &p.input, ctx, config.agent).await));
+            }
+            done
+        };
+        let (task_outputs, other_outputs) = tokio::join!(tasks, others);
+        let mut outputs: Vec<Option<tools::ToolOutput>> =
+            prepared.iter_mut().map(|p| p.outcome.take()).collect();
+        for (i, output) in task_outputs.into_iter().chain(other_outputs) {
+            outputs[i] = Some(output);
+        }
+
+        // 3. In order: PostToolUse hooks, then the results.
+        let mut results = Vec::new();
+        for (p, output) in prepared.into_iter().zip(outputs) {
+            let Prepared {
+                id,
+                name,
+                input,
+                blocked,
+                stop,
+                ..
+            } = p;
+            let Some(mut output) = output else { continue };
             // Like Claude Code, PostToolUse runs only for tools that ran.
             let post = if blocked {
                 crate::hooks::Outcome::default()
             } else {
                 config
-                .hooks
-                .run(
-                    "PostToolUse",
-                    Some(&name),
-                    json!({
-                        "tool_input": crate::hooks::claude_input(&input),
-                        "tool_response": {"output": output.content, "is_error": output.is_error},
-                    }),
-                )
-                .await
+                    .hooks
+                    .run(
+                        "PostToolUse",
+                        Some(&name),
+                        json!({
+                            "tool_input": crate::hooks::claude_input(&input),
+                            "tool_response": {"output": output.content, "is_error": output.is_error},
+                        }),
+                    )
+                    .await
             };
             notify(events, &post.notices);
             // What hooks say after a tool goes to the model with its result.
             for note in post.block.iter().chain(&post.context) {
                 output.content.push_str(&format!("\n\n[hook] {note}"));
             }
-            if let Some(reason) = pre.stop.or(post.stop) {
+            if let Some(reason) = stop.or(post.stop) {
                 let _ = events.send(AgentEvent::Notice(format!(
                     "A hook ended the turn: {reason}"
                 )));

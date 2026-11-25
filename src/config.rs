@@ -30,6 +30,13 @@ pub struct Config {
     pub models: BTreeMap<String, crate::providers::models::ModelCaps>,
     /// Compact the conversation when it fills this share of the context window (0.8).
     pub compact_at: Option<f64>,
+    /// How many subagents may run at once (default 4).
+    pub max_parallel_agents: Option<usize>,
+    /// The model for `explore` and other "small" subagents (default: a smaller model
+    /// from the same provider).
+    pub subagent_model: Option<String>,
+    /// Model requests a subagent may make (default 60).
+    pub subagent_max_steps: Option<u32>,
     /// Snapshot files around each turn for undo (default true).
     pub checkpoints: Option<bool>,
     /// Commands run at points in a turn, in Claude Code's format (`[[hooks.PreToolUse]]`).
@@ -182,6 +189,15 @@ impl Config {
         self.models.extend(layer.models);
         if layer.compact_at.is_some() {
             self.compact_at = layer.compact_at;
+        }
+        if layer.max_parallel_agents.is_some() {
+            self.max_parallel_agents = layer.max_parallel_agents;
+        }
+        if layer.subagent_model.is_some() {
+            self.subagent_model = layer.subagent_model;
+        }
+        if layer.subagent_max_steps.is_some() {
+            self.subagent_max_steps = layer.subagent_max_steps;
         }
         if layer.checkpoints.is_some() {
             self.checkpoints = layer.checkpoints;

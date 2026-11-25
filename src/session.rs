@@ -301,6 +301,14 @@ impl Session {
                     ),
                 });
             }
+            AgentEvent::SubagentStatus { id, text } => {
+                if let Some(Entry::Tool { meta, state, .. }) = self.tool_entry(id)
+                    && matches!(state, ToolState::Running | ToolState::Pending)
+                {
+                    meta.detail = Some(text.clone());
+                }
+            }
+            AgentEvent::SubagentUsage(usage) => self.usage.add(*usage),
             AgentEvent::PromptBlocked(reason) => {
                 // Take the prompt back out, as if it was never sent.
                 if let Some((messages, entries, _)) = self.turn_start.take() {
@@ -509,12 +517,20 @@ impl Session {
 
     /// Sessions started in `project` (or below it), newest first.
     pub fn list(project: &Path) -> Vec<SessionSummary> {
-        store::get().list_sessions(project, None)
+        store::get()
+            .list_sessions(project, None)
+            .into_iter()
+            .filter(|s| !s.id.starts_with("sub-"))
+            .collect()
     }
 
     /// Sessions in `project` whose title or conversation matches `query`, best first.
     pub fn search(project: &Path, query: &str) -> Vec<SessionSummary> {
-        store::get().list_sessions(project, Some(query))
+        store::get()
+            .list_sessions(project, Some(query))
+            .into_iter()
+            .filter(|s| !s.id.starts_with("sub-"))
+            .collect()
     }
 }
 

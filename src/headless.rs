@@ -183,6 +183,10 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
                             json!({"type": "error", "text": format!("A hook blocked this prompt: {reason}")})
                         }
                         AgentEvent::UserContext(_) => continue,
+                        AgentEvent::SubagentUsage(_) => continue,
+                        AgentEvent::SubagentStatus { id, text } => {
+                            json!({"type": "subagent_status", "id": id, "text": text})
+                        }
                         AgentEvent::Checkpoint { files, .. } => {
                             json!({"type": "files_changed", "files": files.iter().map(|(s, p)| json!({"status": s.to_string(), "path": p})).collect::<Vec<_>>()})
                         }

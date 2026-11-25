@@ -64,7 +64,7 @@ impl Skill {
 }
 
 /// Splits `---\nfrontmatter\n---\nbody`.
-fn split_frontmatter(text: &str) -> (&str, &str) {
+pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
     let trimmed = text.trim_start_matches('\u{feff}');
     if let Some(rest) = trimmed.strip_prefix("---") {
         let rest = rest
@@ -83,7 +83,7 @@ fn split_frontmatter(text: &str) -> (&str, &str) {
 
 /// Reads simple `key: value` frontmatter, including `>`/`|` blocks and indented
 /// continuation lines.
-fn frontmatter_value(front: &str, key: &str) -> Option<String> {
+pub(crate) fn frontmatter_value(front: &str, key: &str) -> Option<String> {
     let mut lines = front.lines().peekable();
     while let Some(line) = lines.next() {
         let Some(rest) = line.strip_prefix(key).and_then(|r| r.strip_prefix(':')) else {

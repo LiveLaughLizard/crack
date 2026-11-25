@@ -357,6 +357,18 @@ pub fn claude_name(tool: &str) -> String {
     }
 }
 
+/// crack's name for a tool written Claude Code's way (`Read` → `read`), for agent files.
+pub fn crack_tool_name(name: &str) -> String {
+    match name {
+        "LS" => "list".into(),
+        "TodoWrite" => "todowrite".into(),
+        "WebFetch" => "webfetch".into(),
+        "Task" => "task".into(),
+        other if other.starts_with("mcp__") => other.to_owned(),
+        other => other.to_ascii_lowercase(),
+    }
+}
+
 /// A tool's input with Claude Code's key names added (`file_path` for `path`).
 pub fn claude_input(input: &Value) -> Value {
     let mut input = input.clone();
