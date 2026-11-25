@@ -1013,7 +1013,9 @@ impl CrackView {
             PickerKind::Help => {}
             PickerKind::Undo => self.confirm_rewind(&id, cx),
             PickerKind::Mcp => {
-                if !id.is_empty() {
+                if let Some(name) = id.strip_prefix("signin:") {
+                    self.sign_in_mcp(name.to_owned(), cx);
+                } else if !id.is_empty() {
                     self.show_toast(format!("Reconnecting {id}…"), false, cx);
                     self.connect_mcp(Some(id), cx);
                 }
@@ -1393,6 +1395,42 @@ impl CrackView {
         .detach();
     }
 
+    /// OAuth sign-in for an MCP server: opens the browser, waits for the callback,
+    /// then reconnects.
+    pub(super) fn sign_in_mcp(&mut self, name: String, cx: &mut Context<Self>) {
+        let hub = self.ws.mcp.clone();
+        let (url_tx, url_rx) = tokio::sync::oneshot::channel::<String>();
+        let server = name.clone();
+        let task = crate::runtime::spawn(async move {
+            hub.sign_in(&server, move |url| {
+                let _ = url_tx.send(url);
+            })
+            .await
+        });
+        self.show_toast(
+            format!("Opening the browser to sign in to {name}…"),
+            false,
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if let Ok(url) = url_rx.await {
+                let _ = this.update(cx, |_, cx| cx.open_url(&url));
+            }
+            let result = task.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(Ok(())) => view.show_toast(format!("Signed in to {name}."), false, cx),
+                    Ok(Err(error)) => {
+                        view.show_toast(format!("Sign-in to {name} failed: {error:#}"), true, cx)
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn mcp_items(&self) -> Vec<PickerItem> {
         let mut items: Vec<PickerItem> = self
             .ws
@@ -1402,17 +1440,34 @@ impl CrackView {
             .map(|server| {
                 let description = match &server.status {
                     crate::mcp::Status::Connected => {
-                        format!("● connected · {} tools", server.tools)
+                        let mut text = format!("● connected · {} tools", server.tools);
+                        if server.resources > 0 {
+                            text.push_str(&format!(" · {} resources", server.resources));
+                        }
+                        if server.prompts > 0 {
+                            text.push_str(&format!(" · {} prompts", server.prompts));
+                        }
+                        text
                     }
+                    crate::mcp::Status::NeedsAuth => "! needs sign-in".into(),
                     crate::mcp::Status::Connecting => "⋯ connecting".into(),
                     crate::mcp::Status::Failed(why) => format!("✗ {why}"),
                     crate::mcp::Status::Disabled => "disabled".into(),
                 };
+                let needs_auth = server.status == crate::mcp::Status::NeedsAuth;
                 PickerItem {
-                    id: server.name.clone(),
+                    id: if needs_auth {
+                        format!("signin:{}", server.name)
+                    } else {
+                        server.name.clone()
+                    },
                     title: server.name,
                     description: Some(description),
-                    footer: Some(format!("{} · enter reconnects", server.transport)),
+                    footer: Some(format!(
+                        "{} · enter {}",
+                        server.transport,
+                        if needs_auth { "signs in" } else { "reconnects" }
+                    )),
                     ..Default::default()
                 }
             })

@@ -1198,6 +1198,9 @@ impl CrackView {
                         ("●", theme::success(), format!("{} tools", server.tools))
                     }
                     crate::mcp::Status::Connecting => ("○", theme::warning(), "connecting".into()),
+                    crate::mcp::Status::NeedsAuth => {
+                        ("●", theme::warning(), "needs sign-in".into())
+                    }
                     crate::mcp::Status::Failed(_) => ("●", theme::error(), "failed".into()),
                     crate::mcp::Status::Disabled => ("○", theme::muted(), "disabled".into()),
                 };
