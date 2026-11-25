@@ -58,6 +58,12 @@ There is also an AppImage per build type (`crack-<version>-<build>-<arch>.AppIma
 `chmod +x` it and run it. It carries its own copies of the window libraries but uses
 your system's graphics driver.
 
+There are also macOS (Apple Silicon) `.tar.gz` and Windows `.zip` downloads of the
+default build. They're built and tested in CI but not yet on real machines. On macOS,
+shell commands run under `sandbox-exec`. Windows has no sandbox yet, so commands outside
+the safe list ask first unless your rules allow them; they run in Git Bash when it's installed, else
+PowerShell.
+
 The binary needs the usual desktop libraries: Wayland or X11 (`libxkbcommon`), Vulkan
 (`libvulkan1`), fontconfig and freetype.
 
