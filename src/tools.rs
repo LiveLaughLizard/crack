@@ -62,6 +62,8 @@ pub struct ToolContext {
     pub allow: Option<Vec<String>>,
     /// MCP servers whose tools are offered alongside the built-in ones.
     pub mcp: Arc<crate::mcp::McpHub>,
+    /// Run shell commands in this sandbox (`None`: run them directly).
+    pub sandbox: Option<crate::policy::Sandbox>,
     /// Instruction files already in the system prompt or loaded by `read`.
     pub loaded: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
 }
@@ -95,6 +97,11 @@ pub struct ToolOutput {
 }
 
 impl ToolOutput {
+    /// A call that wasn't run (denied or not approved).
+    pub fn refused(content: String, title: String) -> Self {
+        Self::error(content, title)
+    }
+
     fn ok(content: impl Into<String>, meta: ToolMeta) -> Self {
         Self {
             content: content.into(),
@@ -429,9 +436,18 @@ async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         .unwrap_or(120)
         .clamp(1, 600);
 
-    let mut child = tokio::process::Command::new("bash")
-        .arg("-c")
-        .arg(command)
+    // In the sandbox, bash runs under bwrap: the project writable, the rest read-only.
+    let root = crate::context::project_root(&ctx.cwd);
+    let argv: Vec<String> = match &ctx.sandbox {
+        Some(sandbox) if sandbox.active() => crate::policy::sandboxed(command, sandbox, &root)
+            .ok_or_else(|| anyhow::anyhow!("the sandbox (bwrap) could not be started"))?,
+        Some(sandbox) if sandbox.forced => {
+            anyhow::bail!("this build requires the sandbox, and bubblewrap (bwrap) isn't installed")
+        }
+        _ => vec!["bash".into(), "-c".into(), command.to_owned()],
+    };
+    let mut child = tokio::process::Command::new(&argv[0])
+        .args(&argv[1..])
         .current_dir(&workdir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1037,6 +1053,7 @@ mod tests {
             allow: None,
             loaded: Default::default(),
             mcp: crate::mcp::McpHub::new(Default::default(), reqwest::Client::new()),
+            sandbox: None,
         }
     }
 

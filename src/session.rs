@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 #[serde(rename_all = "lowercase")]
 pub enum ToolState {
     Pending,
+    /// Waiting for the user to approve it.
+    Waiting,
     Running,
     Done,
     Error,
@@ -252,6 +254,12 @@ impl Session {
                 self.usage.add(*usage);
                 self.context_tokens = usage.context() + usage.output_tokens;
             }
+            AgentEvent::Approval { id, reason } => {
+                if let Some(Entry::Tool { state, meta, .. }) = self.tool_entry(id) {
+                    *state = ToolState::Waiting;
+                    meta.detail = Some(reason.clone());
+                }
+            }
             AgentEvent::Notice(text) => self.entries.push(Entry::Notice { text: text.clone() }),
             AgentEvent::Error(text) => {
                 self.close_thinking();
@@ -265,7 +273,10 @@ impl Session {
                 // Calls that never ran (interrupted) are marked as failed.
                 for (index, entry) in self.entries.iter_mut().enumerate() {
                     if let Entry::Tool { state, .. } = entry
-                        && matches!(state, ToolState::Pending | ToolState::Running)
+                        && matches!(
+                            state,
+                            ToolState::Pending | ToolState::Running | ToolState::Waiting
+                        )
                     {
                         *state = ToolState::Error;
                         self.dirty_from = self.dirty_from.min(index);

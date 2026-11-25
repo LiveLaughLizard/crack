@@ -30,6 +30,8 @@ pub struct Selection {
     pub model: Option<String>,
     pub effort: Effort,
     pub agent: Agent,
+    /// How much runs without asking (normal, accept edits, YOLO).
+    pub mode: crate::policy::Mode,
 }
 
 impl Workspace {
@@ -84,6 +86,7 @@ impl Workspace {
                 .as_deref()
                 .and_then(Agent::parse)
                 .unwrap_or_default(),
+            mode: crate::policy::Mode::Normal,
         }
     }
 
@@ -111,6 +114,14 @@ impl Workspace {
             agent: selection.agent,
             max_tokens: self.config.max_tokens.unwrap_or(64_000),
             max_steps: None,
+            policy: crate::policy::Policy::new(
+                &self.config.permissions,
+                &self.cwd,
+                selection.mode,
+                crate::policy::Sandbox::resolve(&self.config.permissions).active(),
+            ),
+            session_rules: Default::default(),
+            approvals: None,
         })
     }
 
@@ -122,6 +133,7 @@ impl Workspace {
         ToolContext {
             cwd: self.cwd.clone(),
             mcp: self.mcp.clone(),
+            sandbox: Some(crate::policy::Sandbox::resolve(&self.config.permissions)),
             skills: self.skills.clone(),
             todos,
             http: self.http.clone(),

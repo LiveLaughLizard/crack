@@ -64,6 +64,23 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
     ("sidebar", "Toggle the sidebar", &[]),
     ("mcp", "MCP servers: status and reconnect", &["mcps"]),
     ("tab", "Open a new tab", &["newtab"]),
+    (
+        "yolo",
+        "YOLO mode: run every tool without asking (toggle)",
+        &[],
+    ),
+    (
+        "accept-edits",
+        "Accept edits: file edits in the project never ask",
+        &["acceptedits"],
+    ),
+    ("normal", "Normal mode: ask before risky actions", &[]),
+    ("sandbox", "Sandbox shell commands: on / off", &[]),
+    (
+        "sandbox-network",
+        "Sandbox: allow / block network access",
+        &[],
+    ),
     ("close", "Close this tab", &["closetab"]),
     ("help", "Keybindings", &[]),
     ("exit", "Quit", &["quit", "q"]),
@@ -91,6 +108,15 @@ pub struct CrackView {
     pub(super) running: Option<Running>,
     pub(super) esc_armed: Option<Instant>,
     pub(super) todos: Arc<Mutex<Vec<Todo>>>,
+    /// "Allow for this session" rules of the active tab.
+    pub(super) session_rules: Arc<Mutex<Vec<String>>>,
+    /// Tool calls waiting for approval, by tab.
+    pub(super) approvals: HashMap<u64, agent::ApprovalRequest>,
+    pub(super) approval_focus: gpui::FocusHandle,
+    /// Move focus to the approval card on the next frame.
+    pub(super) focus_approval: bool,
+    /// Whether the window is in front (for approval notifications).
+    pub(super) window_active: bool,
     pub(super) picker: Option<(Entity<Picker>, Subscription)>,
     pub(super) providers: Option<(Entity<ProvidersDialog>, Subscription)>,
     pub(super) sidebar: Option<bool>,
@@ -170,6 +196,11 @@ impl CrackView {
             running: None,
             esc_armed: None,
             todos,
+            session_rules: Arc::default(),
+            approvals: HashMap::new(),
+            approval_focus: cx.focus_handle(),
+            focus_approval: false,
+            window_active: true,
             picker: None,
             providers: None,
             sidebar: None,
@@ -336,6 +367,9 @@ impl CrackView {
         {
             let query = query.to_lowercase();
             for (name, description, aliases) in COMMANDS {
+                if !command_available(name) {
+                    continue;
+                }
                 if name.starts_with(&query) || aliases.iter().any(|a| a.starts_with(&query)) {
                     self.autocomplete.push(SlashItem {
                         name: name.to_string(),
@@ -480,6 +514,11 @@ impl CrackView {
             Some("sidebar") => self.toggle_sidebar(window, cx),
             Some("mcp") => self.open_picker(PickerKind::Mcp, window, cx),
             Some("tab") => self.new_tab(window, cx),
+            Some("yolo") => self.toggle_yolo(cx),
+            Some("accept-edits") => self.set_mode(crate::policy::Mode::AcceptEdits, cx),
+            Some("normal") => self.set_mode(crate::policy::Mode::Normal, cx),
+            Some("sandbox") => self.toggle_sandbox(false, cx),
+            Some("sandbox-network") => self.toggle_sandbox(true, cx),
             Some("close") => {
                 let id = self.tab_id;
                 self.close_tab(id, window, cx)
@@ -570,6 +609,11 @@ impl CrackView {
 
         let (events_tx, mut events) = mpsc::unbounded_channel();
         let (cancel_tx, cancel) = watch::channel(false);
+        // Approvals come back to this tab; "allow for this session" rules stay with it.
+        let (approvals_tx, mut approval_requests) = mpsc::unbounded_channel();
+        let mut config = config;
+        config.approvals = Some(approvals_tx);
+        config.session_rules = self.session_rules.clone();
         let tools = self.ws.tool_context(self.todos.clone(), None);
         let history = self.session.messages.clone();
         crate::runtime::spawn(agent::run_turn(config, history, tools, events_tx, cancel));
@@ -581,6 +625,17 @@ impl CrackView {
 
         // Events belong to the tab that started the turn, even after switching away.
         let tab = self.tab_id;
+        cx.spawn(async move |this, cx| {
+            while let Some(request) = approval_requests.recv().await {
+                if this
+                    .update(cx, |view, cx| view.on_approval_request(tab, request, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         let agent = self.selection.agent;
         let model = self.selection.model.clone().unwrap_or_default();
         cx.spawn(async move |this, cx| {
@@ -1061,11 +1116,12 @@ impl CrackView {
             "new" | "sessions" | "rename" | "copy" | "tab" | "close" => "Session",
             "models" | "effort" | "agents" | "connect" => "Agent",
             "skills" | "init" | "reload" | "cd" => "Project",
+            "yolo" | "accept-edits" | "normal" | "sandbox" | "sandbox-network" => "Safety",
             _ => "System",
         };
         let mut items: Vec<PickerItem> = COMMANDS
             .iter()
-            .filter(|(name, _, _)| !matches!(*name, "rename" | "cd"))
+            .filter(|(name, _, _)| !matches!(*name, "rename" | "cd") && command_available(name))
             .map(|(name, description, _)| PickerItem {
                 id: name.to_string(),
                 title: description.to_string(),
@@ -1076,7 +1132,7 @@ impl CrackView {
             })
             .collect();
         items.sort_by_key(|i| {
-            ["Session", "Agent", "Project", "System"]
+            ["Session", "Agent", "Safety", "Project", "System"]
                 .iter()
                 .position(|g| Some(*g) == i.category.as_deref())
         });
@@ -1263,6 +1319,7 @@ pub(super) struct TabState {
     pub running: Option<Running>,
     pub todos: Arc<Mutex<Vec<Todo>>>,
     pub expanded: HashSet<String>,
+    pub session_rules: Arc<Mutex<Vec<String>>>,
     pub follow: bool,
     pub scroll: ScrollHandle,
     pub esc_armed: Option<Instant>,
@@ -1278,6 +1335,7 @@ impl CrackView {
             session: std::mem::replace(&mut self.session, Session::new(&self.ws.cwd)),
             running: self.running.take(),
             todos: std::mem::take(&mut self.todos),
+            session_rules: std::mem::take(&mut self.session_rules),
             expanded: std::mem::take(&mut self.expanded),
             follow: std::mem::replace(&mut self.follow, true),
             scroll: std::mem::replace(&mut self.scroll, ScrollHandle::new()),
@@ -1291,6 +1349,8 @@ impl CrackView {
         self.session = tab.session;
         self.running = tab.running;
         self.todos = tab.todos;
+        self.session_rules = tab.session_rules;
+        self.focus_approval = self.approvals.contains_key(&id);
         self.expanded = tab.expanded;
         self.follow = tab.follow;
         self.scroll = tab.scroll;
@@ -1306,6 +1366,7 @@ impl CrackView {
             session: Session::new(&self.ws.cwd),
             running: None,
             todos: Arc::default(),
+            session_rules: Arc::default(),
             expanded: HashSet::new(),
             follow: true,
             scroll: ScrollHandle::new(),
@@ -1589,5 +1650,148 @@ impl CrackView {
             window.focus(&picker.focus_handle(cx));
         }
         self.show_toast("Session deleted.", false, cx);
+    }
+}
+
+/// How the user answered an approval card.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ApprovalChoice {
+    Once,
+    Session,
+    Always,
+    Deny,
+}
+
+/// Commands that only exist in some builds.
+pub(super) fn command_available(name: &str) -> bool {
+    match name {
+        "yolo" => cfg!(feature = "yolo"),
+        "sandbox" => !cfg!(feature = "force-sandbox"),
+        _ => true,
+    }
+}
+
+impl CrackView {
+    fn on_approval_request(
+        &mut self,
+        tab: u64,
+        request: agent::ApprovalRequest,
+        cx: &mut Context<Self>,
+    ) {
+        if tab == self.tab_id {
+            self.focus_approval = true;
+        }
+        if !self.window_active {
+            // Best effort: a desktop notification when crack isn't in front.
+            let summary = crate::tools::title(&request.tool, &request.input);
+            let _ = std::process::Command::new("notify-send")
+                .args(["--app-name=crack", "crack needs your approval", &summary])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+        self.approvals.insert(tab, request);
+        cx.notify();
+    }
+
+    pub(super) fn answer_approval(
+        &mut self,
+        choice: ApprovalChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(request) = self.approvals.remove(&self.tab_id) else {
+            return;
+        };
+        let answer = match choice {
+            ApprovalChoice::Once => crate::policy::Answer::Once,
+            ApprovalChoice::Session => crate::policy::Answer::Session(request.suggestion.clone()),
+            ApprovalChoice::Always => {
+                match crate::config::add_permission_rule(&self.ws.cwd, "allow", &request.suggestion)
+                {
+                    Ok(path) => {
+                        self.ws
+                            .config
+                            .permissions
+                            .allow
+                            .push(request.suggestion.clone());
+                        let shown = crate::tools::display_path(&self.ws.cwd, &path);
+                        self.show_toast(
+                            format!("Saved `{}` to {shown}", request.suggestion),
+                            false,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        self.show_toast(format!("Couldn't save the rule: {error:#}"), true, cx)
+                    }
+                }
+                crate::policy::Answer::Always(request.suggestion.clone())
+            }
+            ApprovalChoice::Deny => crate::policy::Answer::Deny(None),
+        };
+        let _ = request.respond.send(answer);
+        self.focus_prompt(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn set_mode(&mut self, mode: crate::policy::Mode, cx: &mut Context<Self>) {
+        self.selection.mode = mode;
+        let note = if self.running.is_some() {
+            " (from the next message)"
+        } else {
+            ""
+        };
+        self.show_toast(
+            format!("Permission mode: {}{note}", mode.label()),
+            false,
+            cx,
+        );
+    }
+
+    pub(super) fn toggle_yolo(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "yolo")]
+        {
+            let next = if self.selection.mode == crate::policy::Mode::Yolo {
+                crate::policy::Mode::Normal
+            } else {
+                crate::policy::Mode::Yolo
+            };
+            self.set_mode(next, cx);
+        }
+        #[cfg(not(feature = "yolo"))]
+        self.show_toast("This build doesn't include YOLO mode.", true, cx);
+    }
+
+    pub(super) fn toggle_sandbox(&mut self, network: bool, cx: &mut Context<Self>) {
+        let sandbox = crate::policy::Sandbox::resolve(&self.ws.config.permissions);
+        if !network && sandbox.forced {
+            self.show_toast("This build always sandboxes shell commands.", true, cx);
+            return;
+        }
+        let text = if network {
+            let on = !sandbox.network;
+            crate::state::State::update(|s| s.sandbox_network = Some(on));
+            format!(
+                "Sandbox network: {}",
+                if on { "allowed" } else { "blocked" }
+            )
+        } else {
+            let on = !sandbox.wanted;
+            crate::state::State::update(|s| s.sandbox = Some(on));
+            if on && !sandbox.available {
+                "Sandbox on, but bubblewrap (bwrap) isn't installed: commands will ask instead"
+                    .to_owned()
+            } else {
+                format!("Sandbox: {}", if on { "on" } else { "off" })
+            }
+        };
+        let note = if self.running.is_some() {
+            " (from the next message)"
+        } else {
+            ""
+        };
+        self.show_toast(format!("{text}{note}"), false, cx);
     }
 }

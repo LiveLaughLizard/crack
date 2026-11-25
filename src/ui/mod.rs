@@ -54,6 +54,10 @@ actions!(
         SelectTab7,
         SelectTab8,
         SelectTab9,
+        ApproveOnce,
+        ApproveSession,
+        ApproveAlways,
+        DenyApproval,
     ]
 );
 
@@ -126,6 +130,13 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("pagedown", PageDown, ws),
         KeyBinding::new("ctrl-g", ScrollTop, ws),
         KeyBinding::new("ctrl-alt-g", ScrollBottom, ws),
+        // The approval card, when it has focus.
+        KeyBinding::new("y", ApproveOnce, Some("Approval")),
+        KeyBinding::new("enter", ApproveOnce, Some("Approval")),
+        KeyBinding::new("a", ApproveSession, Some("Approval")),
+        KeyBinding::new("shift-a", ApproveAlways, Some("Approval")),
+        KeyBinding::new("n", DenyApproval, Some("Approval")),
+        KeyBinding::new("escape", DenyApproval, Some("Approval")),
     ]);
 }
 

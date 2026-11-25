@@ -24,6 +24,8 @@ pub struct Config {
     pub skills: Vec<String>,
     /// Built-in providers to hide.
     pub disabled_providers: Vec<String>,
+    /// What runs without asking (rules, edits, sandbox).
+    pub permissions: crate::policy::PermissionsConfig,
     /// MCP servers, keyed by name: `command` + `args` (stdio) or `url` (HTTP).
     pub mcp: BTreeMap<String, crate::mcp::McpServerConfig>,
     /// Provider settings, keyed by provider id. Ids that match a built-in provider
@@ -163,6 +165,14 @@ impl Config {
         self.skills.extend(layer.skills);
         self.disabled_providers.extend(layer.disabled_providers);
         self.mcp.extend(layer.mcp);
+        // Project rules add to global ones; settings override.
+        let p = layer.permissions;
+        self.permissions.allow.extend(p.allow);
+        self.permissions.ask.extend(p.ask);
+        self.permissions.deny.extend(p.deny);
+        self.permissions.sandbox_writable.extend(p.sandbox_writable);
+        macro_rules! take { ($($f:ident),*) => { $( if p.$f.is_some() { self.permissions.$f = p.$f; } )* } }
+        take!(edits, bash, webfetch, sandbox, sandbox_network);
         for (id, provider) in layer.provider {
             let merged = match self.provider.remove(&id) {
                 Some(existing) => provider.merged_over(&existing),
@@ -356,6 +366,37 @@ pub fn forget_provider(id: &str) -> anyhow::Result<()> {
         write_private(&path, &doc.to_string())?;
     }
     Ok(())
+}
+
+/// Adds a permission rule to the project's config (`.crack/config.toml`, or an
+/// existing `crack.toml`), for "always allow".
+pub fn add_permission_rule(cwd: &Path, list: &str, rule: &str) -> anyhow::Result<PathBuf> {
+    let root = crate::context::project_root(cwd);
+    let path = [root.join("crack.toml"), root.join(".crack/config.toml")]
+        .into_iter()
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| root.join(".crack/config.toml"));
+    let mut doc = read_doc(&path)?;
+    if !doc.contains_key("permissions") {
+        doc["permissions"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let table = doc["permissions"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("`permissions` in {} is not a table", path.display()))?;
+    if !table.contains_key(list) {
+        table[list] = toml_edit::value(toml_edit::Array::new());
+    }
+    let array = table[list]
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("permissions.{list} in {} is not a list", path.display()))?;
+    if !array.iter().any(|v| v.as_str() == Some(rule)) {
+        array.push(rule);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, doc.to_string())?;
+    Ok(path)
 }
 
 #[cfg(test)]

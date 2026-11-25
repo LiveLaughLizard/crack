@@ -8,6 +8,7 @@ mod config;
 mod context;
 mod headless;
 mod mcp;
+mod policy;
 mod providers;
 mod runtime;
 mod session;
@@ -38,6 +39,8 @@ enum Mode {
         format: headless::Format,
         max_steps: Option<u32>,
         tools: Option<Vec<String>>,
+        permission_mode: policy::Mode,
+        sandbox: Option<bool>,
     },
     Models {
         common: Common,
@@ -190,6 +193,16 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                     Flag::string("tools").usage(
                         "Comma-separated tools to allow (bash,read,write,edit,glob,grep,list,webfetch,todowrite,skill)",
                     ),
+                    Flag::string("permission-mode").usage(if cfg!(feature = "yolo") {
+                        "normal (default: refuse what would need approval), accept-edits, or auto (run everything except deny rules)"
+                    } else {
+                        "normal (default: refuse what would need approval) or accept-edits"
+                    }),
+                    Flag::choice("sandbox", &["on", "off"]).usage(if cfg!(feature = "force-sandbox") {
+                        "This build always sandboxes shell commands"
+                    } else {
+                        "Run shell commands in the sandbox (default on; off for containers without user namespaces)"
+                    }),
                 ])
                 .run(move |ctx| {
                     let format = match ctx.flag_str_or("format", "text") {
@@ -205,6 +218,25 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                             .filter(|s| !s.is_empty())
                             .collect()
                     });
+                    let permission_mode = match ctx.flag("permission-mode") {
+                        None => policy::Mode::Normal,
+                        Some(m) => policy::Mode::parse(m).ok_or_else(|| {
+                            flag_rs::Error::Validation(if cfg!(feature = "yolo") {
+                                format!("unknown permission mode '{m}' (normal, accept-edits, auto)")
+                            } else {
+                                format!("unknown permission mode '{m}' (normal, accept-edits); this build has no auto mode")
+                            })
+                        })?,
+                    };
+                    let sandbox = match ctx.flag("sandbox").map(String::as_str) {
+                        Some("off") if cfg!(feature = "force-sandbox") => {
+                            return Err(flag_rs::Error::Validation(
+                                "this build always sandboxes shell commands; --sandbox off isn't available".into(),
+                            ));
+                        }
+                        Some(value) => Some(value == "on"),
+                        None => None,
+                    };
                     set(
                         &run_mode,
                         Mode::Run {
@@ -213,6 +245,8 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                             format,
                             max_steps,
                             tools,
+                            permission_mode,
+                            sandbox,
                         },
                     );
                     Ok(())
@@ -366,8 +400,14 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
             format,
             max_steps,
             tools,
+            permission_mode,
+            sandbox,
         } => {
-            let (workspace, selection) = load_workspace(&common)?;
+            if let Some(on) = sandbox {
+                policy::override_sandbox(on);
+            }
+            let (workspace, mut selection) = load_workspace(&common)?;
+            selection.mode = permission_mode;
             let prompt = headless::gather_prompt(&prompt_args)?;
             headless::run(
                 workspace,

@@ -228,9 +228,32 @@ impl CrackView {
                     })),
             );
 
+        // The permission mode, when it isn't the normal one.
+        match self.selection.mode {
+            crate::policy::Mode::Normal => {}
+            crate::policy::Mode::AcceptEdits => {
+                meta = meta
+                    .child(div().text_color(theme::muted()).child("·"))
+                    .child(div().text_color(theme::warning()).child("accept edits"));
+            }
+            #[cfg(feature = "yolo")]
+            crate::policy::Mode::Yolo => {
+                meta = meta
+                    .child(div().text_color(theme::muted()).child("·"))
+                    .child(
+                        div()
+                            .text_color(theme::error())
+                            .font_weight(FontWeight::BOLD)
+                            .child("YOLO"),
+                    );
+            }
+        }
+
         let mut column = div().flex().flex_col().w_full();
 
-        if let Some(status) = self.render_status_line() {
+        if let Some(card) = self.render_approval(cx) {
+            column = column.child(card);
+        } else if let Some(status) = self.render_status_line() {
             column = column.child(status);
         }
 
@@ -577,7 +600,14 @@ impl CrackView {
             } else {
                 theme::muted()
             };
-            let icon: AnyElement = if running {
+            let icon: AnyElement = if state == ToolState::Waiting {
+                // Waiting on the approval card above the prompt.
+                div()
+                    .text_color(theme::warning())
+                    .font_weight(FontWeight::BOLD)
+                    .child("?")
+                    .into_any_element()
+            } else if running {
                 spinner(("tool-spin", index), theme::muted())
             } else if failed {
                 div()
@@ -1080,6 +1110,55 @@ impl CrackView {
         }
         column = column.child(instructions);
 
+        // Safety: the permission mode and the sandbox.
+        let sandbox = crate::policy::Sandbox::resolve(&self.ws.config.permissions);
+        let (sandbox_text, sandbox_color) = match (sandbox.wanted, sandbox.available) {
+            (true, true) => (
+                format!(
+                    "on · network {}",
+                    if sandbox.network {
+                        "allowed"
+                    } else {
+                        "blocked"
+                    }
+                ),
+                theme::success(),
+            ),
+            (true, false) if sandbox.forced => {
+                ("required, but bwrap is missing".to_owned(), theme::error())
+            }
+            (true, false) => ("bwrap missing: commands ask".to_owned(), theme::warning()),
+            (false, _) => ("off".to_owned(), theme::warning()),
+        };
+        let mode_color = match self.selection.mode {
+            crate::policy::Mode::Normal => theme::text_soft(),
+            crate::policy::Mode::AcceptEdits => theme::warning(),
+            #[cfg(feature = "yolo")]
+            crate::policy::Mode::Yolo => theme::error(),
+        };
+        column = column.child(
+            div()
+                .flex()
+                .flex_col()
+                .text_color(theme::muted())
+                .child(section("Safety"))
+                .child(
+                    div().flex().flex_row().gap(px(6.)).child("mode").child(
+                        div()
+                            .text_color(mode_color)
+                            .child(self.selection.mode.label()),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(6.))
+                        .child("sandbox")
+                        .child(div().text_color(sandbox_color).child(sandbox_text)),
+                ),
+        );
+
         let servers = self.ws.mcp.snapshot();
         if !servers.is_empty() {
             let mut list = div()
@@ -1131,6 +1210,11 @@ impl CrackView {
 impl Render for CrackView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_window_title(window);
+        self.window_active = window.is_window_active();
+        if self.focus_approval && self.approvals.contains_key(&self.tab_id) {
+            window.focus(&self.approval_focus);
+            self.focus_approval = false;
+        }
         let sidebar = self.sidebar_visible(window);
         let main = if self.session.is_empty() {
             self.render_home(window, cx)
@@ -1463,7 +1547,15 @@ impl CrackView {
                     .text_color(theme::muted())
                     .hover(|d| d.bg(theme::raised_high()).text_color(theme::text_soft()))
             };
-            if running {
+            if self.approvals.contains_key(&id) {
+                // This tab needs you.
+                tab = tab.child(
+                    div()
+                        .text_color(theme::warning())
+                        .font_weight(FontWeight::BOLD)
+                        .child("!"),
+                );
+            } else if running {
                 tab = tab.child(spinner(("tab-spin", id as usize), accent));
             } else if index < 9 {
                 tab = tab.child(
@@ -1509,5 +1601,214 @@ impl CrackView {
                 .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
         )
         .into_any_element()
+    }
+}
+
+impl CrackView {
+    /// The approval card above the prompt: what the model wants to do, why it asks,
+    /// and the four answers.
+    fn render_approval(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let request = self.approvals.get(&self.tab_id)?;
+        let input = &request.input;
+        let (heading, preview): (&str, Vec<(String, Hsla)>) = match request.tool.as_str() {
+            "bash" => (
+                "Run this command?",
+                vec![(
+                    format!("$ {}", input["command"].as_str().unwrap_or_default()),
+                    theme::text(),
+                )],
+            ),
+            "edit" => {
+                let mut lines = vec![(
+                    input["path"].as_str().unwrap_or_default().to_owned(),
+                    theme::text_soft(),
+                )];
+                for line in input["old_string"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .lines()
+                    .take(6)
+                {
+                    lines.push((format!("- {line}"), theme::diff_removed()));
+                }
+                for line in input["new_string"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .lines()
+                    .take(6)
+                {
+                    lines.push((format!("+ {line}"), theme::diff_added()));
+                }
+                ("Make this edit?", lines)
+            }
+            "write" => {
+                let mut lines = vec![(
+                    input["path"].as_str().unwrap_or_default().to_owned(),
+                    theme::text_soft(),
+                )];
+                for line in input["content"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .lines()
+                    .take(8)
+                {
+                    lines.push((format!("+ {line}"), theme::diff_added()));
+                }
+                ("Write this file?", lines)
+            }
+            tool if tool.starts_with("mcp__") => (
+                "Use this MCP tool?",
+                vec![
+                    (crate::tools::title(tool, input), theme::text()),
+                    (
+                        input.to_string().chars().take(300).collect(),
+                        theme::muted(),
+                    ),
+                ],
+            ),
+            tool => (
+                "Allow this?",
+                vec![(crate::tools::title(tool, input), theme::text())],
+            ),
+        };
+        let button = |id: &'static str, key: &'static str, label: String, primary: bool| {
+            div()
+                .id(id)
+                .flex()
+                .flex_row()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(4.))
+                .rounded(px(4.))
+                .border_1()
+                .cursor_pointer()
+                .when(primary, |d| {
+                    d.bg(theme::chip())
+                        .border_color(theme::chip())
+                        .text_color(theme::on_chip())
+                })
+                .when(!primary, |d| {
+                    d.border_color(theme::selected_bg())
+                        .text_color(theme::text())
+                })
+                .hover(|d| d.bg(theme::selected_bg()))
+                .child(div().font_weight(FontWeight::BOLD).child(key))
+                .child(label)
+        };
+        let mut code = div()
+            .flex()
+            .flex_col()
+            .bg(theme::bg())
+            .rounded(px(4.))
+            .px(px(12.))
+            .py(px(8.))
+            .text_size(theme::SMALL_SIZE);
+        for (line, color) in preview {
+            code = code.child(div().text_color(color).child(line));
+        }
+        let rule = request.suggestion.clone();
+        Some(
+            div()
+                .id("approval")
+                .key_context("Approval")
+                .track_focus(&self.approval_focus)
+                .on_action(cx.listener(|this, _: &ApproveOnce, window, cx| {
+                    this.answer_approval(super::view::ApprovalChoice::Once, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ApproveSession, window, cx| {
+                    this.answer_approval(super::view::ApprovalChoice::Session, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ApproveAlways, window, cx| {
+                    this.answer_approval(super::view::ApprovalChoice::Always, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &DenyApproval, window, cx| {
+                    this.answer_approval(super::view::ApprovalChoice::Deny, window, cx)
+                }))
+                .mb(px(8.))
+                .p(px(14.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .bg(theme::raised())
+                .border_1()
+                .rounded(px(6.))
+                .border_color(theme::warning())
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .text_color(theme::warning())
+                                .font_weight(FontWeight::BOLD)
+                                .child(heading),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme::muted())
+                                .child(format!("({})", request.reason)),
+                        ),
+                )
+                .child(code)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(8.))
+                        .child(
+                            button("approve-once", "y", "Allow once".into(), true).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.answer_approval(
+                                        super::view::ApprovalChoice::Once,
+                                        window,
+                                        cx,
+                                    )
+                                }),
+                            ),
+                        )
+                        .child(
+                            button(
+                                "approve-session",
+                                "a",
+                                format!("Allow `{rule}` this session"),
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.answer_approval(
+                                        super::view::ApprovalChoice::Session,
+                                        window,
+                                        cx,
+                                    )
+                                },
+                            )),
+                        )
+                        .child(
+                            button("approve-always", "A", "Always allow".into(), false).on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.answer_approval(
+                                        super::view::ApprovalChoice::Always,
+                                        window,
+                                        cx,
+                                    )
+                                }),
+                            ),
+                        )
+                        .child(
+                            button("deny", "n", "Deny".into(), false).on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.answer_approval(
+                                        super::view::ApprovalChoice::Deny,
+                                        window,
+                                        cx,
+                                    )
+                                },
+                            )),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 }

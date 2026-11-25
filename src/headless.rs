@@ -152,7 +152,9 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
                     let line = match &event {
                         AgentEvent::Text(t) => json!({"type": "text", "text": t}),
                         AgentEvent::Thinking(t) => json!({"type": "thinking", "text": t}),
-                        AgentEvent::ToolStart { .. } | AgentEvent::Message(_) => continue,
+                        AgentEvent::ToolStart { .. }
+                        | AgentEvent::Message(_)
+                        | AgentEvent::Approval { .. } => continue,
                         AgentEvent::ToolCall { id, name, input } => {
                             json!({"type": "tool_call", "id": id, "name": name, "input": input})
                         }

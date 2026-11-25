@@ -63,6 +63,8 @@ check:
     cargo clippy --all-targets -- -D warnings
     cargo clippy --all-targets --no-default-features --features cloud -- -D warnings
     cargo clippy --all-targets --no-default-features -- -D warnings
+    cargo clippy --all-targets --no-default-features --features cloud,china -- -D warnings
+    cargo clippy --all-targets --features force-sandbox -- -D warnings
     cargo test
     cargo test --no-default-features
 
@@ -85,6 +87,11 @@ build-no-china:
 build-airgap:
     cargo build --release --no-default-features --target-dir target/airgap
     @echo "Binary: target/airgap/release/crack"
+
+# Build for companies that keep a human in the loop: no YOLO mode, sandbox always on
+build-strict:
+    cargo build --release --no-default-features --features cloud,china,force-sandbox --target-dir target/strict
+    @echo "Binary: target/strict/release/crack"
 
 # Install the binary into $PREFIX/bin (default ~/.local/bin)
 install: build

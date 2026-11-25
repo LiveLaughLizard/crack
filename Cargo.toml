@@ -80,9 +80,16 @@ strip = true
 #   cargo build --no-default-features --features cloud  no Chinese services
 #   cargo build --no-default-features                   air-gapped: local servers only
 [features]
-default = ["cloud", "china"]
+default = ["cloud", "china", "yolo"]
 # Hosted providers (Anthropic, OpenAI, Gemini, Bedrock, Vertex AI, Azure, OpenRouter, ...)
 # and the webfetch tool.
 cloud = []
 # Chinese model clouds (Qwen, Kimi, Z.ai / GLM, MiniMax, DeepSeek).
 china = ["cloud"]
+# YOLO mode: run every tool call without asking (except deny rules), in the window
+# and as `crack run --permission-mode auto`. Leave it out for builds that must keep a
+# human approving risky actions.
+yolo = []
+# Always run shell commands in the bubblewrap sandbox; it can't be turned off, and
+# without bwrap shell commands are refused.
+force-sandbox = []

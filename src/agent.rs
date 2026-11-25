@@ -36,6 +36,11 @@ pub enum AgentEvent {
     Message(Message),
     Usage(Usage),
     Notice(String),
+    /// A tool call is waiting for approval.
+    Approval {
+        id: String,
+        reason: String,
+    },
     Error(String),
     Done {
         interrupted: bool,
@@ -53,6 +58,22 @@ pub struct TurnConfig {
     pub max_tokens: u32,
     /// Stop after this many model requests (headless runs).
     pub max_steps: Option<u32>,
+    /// What may run without asking.
+    pub policy: crate::policy::Policy,
+    /// "Allow for this session" answers, shared with the tab so they outlive the turn.
+    pub session_rules: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Where to ask for approval; `None` (headless) refuses what would need it.
+    pub approvals: Option<mpsc::UnboundedSender<ApprovalRequest>>,
+}
+
+/// A tool call waiting for the user's yes or no.
+pub struct ApprovalRequest {
+    pub tool: String,
+    pub input: Value,
+    pub reason: String,
+    /// The rule "allow for this session" would add, e.g. `Bash(cargo test *)`.
+    pub suggestion: String,
+    pub respond: tokio::sync::oneshot::Sender<crate::policy::Answer>,
 }
 
 pub type Events = mpsc::UnboundedSender<AgentEvent>;
@@ -217,7 +238,10 @@ async fn turn_loop(
                 name: name.clone(),
                 input: input.clone(),
             });
-            let output = tools::run(&name, &input, ctx, config.agent).await;
+            let output = match permit(config, &id, &name, &input, events).await {
+                Ok(()) => tools::run(&name, &input, ctx, config.agent).await,
+                Err(refusal) => refusal,
+            };
             let _ = events.send(AgentEvent::ToolResult {
                 id: id.clone(),
                 is_error: output.is_error,
@@ -237,5 +261,73 @@ async fn turn_loop(
         };
         history.push(message.clone());
         let _ = events.send(AgentEvent::Message(message));
+    }
+}
+
+/// Checks a tool call against the policy and asks the user when it needs a yes.
+/// `Err` carries the result the model gets instead of running the tool.
+async fn permit(
+    config: &TurnConfig,
+    id: &str,
+    name: &str,
+    input: &Value,
+    events: &Events,
+) -> Result<(), tools::ToolOutput> {
+    use crate::policy::{Answer, Decision};
+    let rules = config.session_rules.lock().unwrap().clone();
+    let decision = config
+        .policy
+        .clone()
+        .with_session_rules(&rules)
+        .check(name, input);
+    let title = tools::title(name, input);
+    let refuse = |text: String| tools::ToolOutput::refused(text, title.clone());
+    match decision {
+        Decision::Allow => Ok(()),
+        Decision::Deny(reason) => Err(refuse(format!(
+            "Not allowed: {reason}. Don't retry this; if you need it, ask the user to change the permission rules."
+        ))),
+        Decision::Ask(reason) => {
+            let Some(approvals) = &config.approvals else {
+                return Err(refuse(format!(
+                    "This needs a person's approval ({reason}), and this headless run can't ask. \
+                     Work without it, or tell the user which permission rule to add \
+                     (`[permissions] allow` in crack's config) or which --permission-mode to use."
+                )));
+            };
+            let suggestion =
+                crate::policy::suggest_rule(name, input, &config.policy.root, &config.policy.cwd);
+            let (respond, answer) = tokio::sync::oneshot::channel();
+            let _ = events.send(AgentEvent::Approval {
+                id: id.to_owned(),
+                reason: reason.clone(),
+            });
+            let request = ApprovalRequest {
+                tool: name.to_owned(),
+                input: input.clone(),
+                reason,
+                suggestion,
+                respond,
+            };
+            if approvals.send(request).is_err() {
+                return Err(refuse(
+                    "Couldn't ask for approval; the window is gone.".into(),
+                ));
+            }
+            match answer.await {
+                Ok(Answer::Once) => Ok(()),
+                Ok(Answer::Session(rule)) | Ok(Answer::Always(rule)) => {
+                    config.session_rules.lock().unwrap().push(rule);
+                    Ok(())
+                }
+                Ok(Answer::Deny(note)) => Err(refuse(match note {
+                    Some(note) => format!("The user denied this: {note}"),
+                    None => {
+                        "The user denied this. Don't retry it; ask what they'd like instead.".into()
+                    }
+                })),
+                Err(_) => Err(refuse("The approval was cancelled.".into())),
+            }
+        }
     }
 }

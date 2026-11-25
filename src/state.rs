@@ -13,6 +13,10 @@ pub struct State {
     pub window_maximized: bool,
     /// Last chosen reasoning effort.
     pub effort: Option<Effort>,
+    /// Sandbox shell commands (ctrl-p toggle); `None` means the default (on).
+    pub sandbox: Option<bool>,
+    /// Let sandboxed commands use the network; `None` means the default (yes).
+    pub sandbox_network: Option<bool>,
 }
 
 /// The state as last loaded or saved by this process. Saves go through the store's
