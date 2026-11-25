@@ -1,0 +1,845 @@
+//! The Anthropic Messages API: first-party, Claude in Amazon Bedrock (Mantle),
+//! Google Vertex AI and Microsoft Foundry.
+
+use super::sse::SseReader;
+use super::{
+    ChatRequest, Completion, Effort, EventSink, Message, Part, Role, StopReason, StreamEvent, Usage,
+};
+use anyhow::{Context as _, anyhow};
+use serde_json::{Value, json};
+#[cfg(feature = "cloud")]
+use std::sync::Mutex;
+use std::time::Duration;
+#[cfg(feature = "cloud")]
+use std::time::Instant;
+
+#[derive(Clone, Debug)]
+pub enum Platform {
+    /// api.anthropic.com, or any server with the same API (Foundry, proxies).
+    Direct { base_url: String },
+    #[cfg(feature = "cloud")]
+    /// Claude in Amazon Bedrock, through the Messages-API (Mantle) endpoint.
+    Bedrock { region: String },
+    #[cfg(feature = "cloud")]
+    /// Claude on Google Cloud Vertex AI.
+    Vertex { project: String, region: String },
+}
+
+#[derive(Clone, Debug)]
+pub enum Auth {
+    /// `x-api-key`.
+    ApiKey(String),
+    /// `Authorization: Bearer` (OAuth tokens, Bedrock API keys).
+    Bearer(String),
+    #[cfg(feature = "cloud")]
+    /// AWS credentials, signed per request.
+    SigV4 {
+        credentials: AwsCredentials,
+        service: String,
+    },
+    #[cfg(feature = "cloud")]
+    /// A Google access token from `GOOGLE_OAUTH_ACCESS_TOKEN` or `gcloud`.
+    Google,
+    None,
+}
+
+#[cfg(feature = "cloud")]
+/// Where AWS keys come from.
+#[derive(Clone, Debug)]
+pub enum AwsCredentials {
+    Static {
+        access_key: String,
+        secret_key: String,
+        session_token: Option<String>,
+    },
+    /// A named profile in ~/.aws (static keys, SSO, assumed roles...). Resolved with
+    /// `aws configure export-credentials`, or read from ~/.aws/credentials.
+    Profile(String),
+}
+
+#[cfg(feature = "cloud")]
+impl AwsCredentials {
+    pub async fn resolve(&self) -> anyhow::Result<(String, String, Option<String>)> {
+        match self {
+            AwsCredentials::Static {
+                access_key,
+                secret_key,
+                session_token,
+            } => Ok((
+                access_key.clone(),
+                secret_key.clone(),
+                session_token.clone(),
+            )),
+            AwsCredentials::Profile(profile) => aws_profile_credentials(profile).await,
+        }
+    }
+}
+
+#[cfg(feature = "cloud")]
+type AwsKeys = (String, String, Option<String>);
+
+#[cfg(feature = "cloud")]
+async fn aws_profile_credentials(profile: &str) -> anyhow::Result<AwsKeys> {
+    static CACHE: Mutex<Vec<(String, AwsKeys, Instant)>> = Mutex::new(Vec::new());
+    if let Some((_, keys, at)) = CACHE.lock().unwrap().iter().find(|(p, ..)| p == profile)
+        && at.elapsed() < Duration::from_secs(10 * 60)
+    {
+        return Ok(keys.clone());
+    }
+    let keys = match tokio::process::Command::new("aws")
+        .args(["configure", "export-credentials", "--profile", profile, "--format", "process"])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            let json: Value = serde_json::from_slice(&output.stdout)?;
+            (
+                json["AccessKeyId"].as_str().unwrap_or_default().to_owned(),
+                json["SecretAccessKey"].as_str().unwrap_or_default().to_owned(),
+                json["SessionToken"].as_str().map(str::to_owned),
+            )
+        }
+        Ok(output) => {
+            let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            if message.contains("expired") || message.contains("sso") || message.contains("SSO") {
+                return Err(anyhow!(
+                    "AWS profile '{profile}': {message}. Use \"Sign in\" under Providers (aws sso login)."
+                ));
+            }
+            read_aws_credentials_file(profile).ok_or_else(|| anyhow!("AWS profile '{profile}': {message}"))?
+        }
+        // No AWS CLI: static keys in ~/.aws/credentials still work.
+        Err(_) => read_aws_credentials_file(profile).ok_or_else(|| {
+            anyhow!("AWS profile '{profile}' has no keys in ~/.aws/credentials, and the AWS CLI isn't installed")
+        })?,
+    };
+    let mut cache = CACHE.lock().unwrap();
+    cache.retain(|(p, ..)| p != profile);
+    cache.push((profile.to_owned(), keys.clone(), Instant::now()));
+    Ok(keys)
+}
+
+#[cfg(feature = "cloud")]
+fn read_aws_credentials_file(profile: &str) -> Option<AwsKeys> {
+    let path = std::env::var("AWS_SHARED_CREDENTIALS_FILE")
+        .map(std::path::PathBuf::from)
+        .ok()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".aws/credentials")))?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut in_section = false;
+    let (mut access, mut secret, mut token) = (None, None, None);
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_section = line.trim_matches(['[', ']']).trim() == profile;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let value = Some(value.trim().to_owned());
+            match key.trim() {
+                "aws_access_key_id" => access = value,
+                "aws_secret_access_key" => secret = value,
+                "aws_session_token" => token = value,
+                _ => {}
+            }
+        }
+    }
+    Some((access?, secret?, token))
+}
+
+#[derive(Clone, Debug)]
+pub struct AnthropicEndpoint {
+    pub platform: Platform,
+    pub auth: Auth,
+    pub headers: Vec<(String, String)>,
+}
+
+/// How a model takes thinking configuration.
+enum ThinkingStyle {
+    /// Claude 4.6 and later: `thinking: {type: "adaptive"}` + `output_config.effort`.
+    Adaptive,
+    /// Older models: a fixed `budget_tokens`, no effort parameter.
+    Budget,
+}
+
+fn thinking_style(model: &str) -> ThinkingStyle {
+    const LEGACY: [&str; 8] = [
+        "claude-3",
+        "-4-5",
+        "-4-1",
+        "-4-0",
+        "opus-4-2",
+        "sonnet-4-2",
+        "opus-4@",
+        "sonnet-4@",
+    ];
+    if LEGACY.iter().any(|marker| model.contains(marker)) {
+        ThinkingStyle::Budget
+    } else {
+        ThinkingStyle::Adaptive
+    }
+}
+
+/// Models that refuse some requests through safety classifiers and accept the
+/// server-side fallback parameter on the first-party API.
+fn supports_fallbacks(model: &str) -> bool {
+    [
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-fable-5-1",
+        "claude-sonnet-5-5",
+    ]
+    .contains(&model)
+}
+
+impl AnthropicEndpoint {
+    /// api.anthropic.com itself. Beta fields (server-side fallbacks, eager input
+    /// streaming) are only sent there: proxies and cloud platforms may reject them.
+    fn first_party(&self) -> bool {
+        #[cfg(feature = "cloud")]
+        return matches!(&self.platform, Platform::Direct { base_url } if base_url.contains("api.anthropic.com"));
+        // Air-gapped builds only talk to self-hosted servers.
+        #[cfg(not(feature = "cloud"))]
+        false
+    }
+
+    /// Vertex takes the API version in the body instead of a header.
+    fn sends_version_header(&self) -> bool {
+        #[cfg(feature = "cloud")]
+        if matches!(self.platform, Platform::Vertex { .. }) {
+            return false;
+        }
+        true
+    }
+
+    #[cfg_attr(not(feature = "cloud"), allow(unused_variables))]
+    fn url(&self, model: &str) -> String {
+        match &self.platform {
+            Platform::Direct { base_url } => {
+                let base = base_url.trim_end_matches('/');
+                if base.ends_with("/v1") {
+                    format!("{base}/messages")
+                } else {
+                    format!("{base}/v1/messages")
+                }
+            }
+            #[cfg(feature = "cloud")]
+            Platform::Bedrock { region } => {
+                format!("https://bedrock-mantle.{region}.api.aws/anthropic/v1/messages")
+            }
+            #[cfg(feature = "cloud")]
+            Platform::Vertex { project, region } => {
+                let host = if region == "global" {
+                    "aiplatform.googleapis.com".to_owned()
+                } else {
+                    format!("{region}-aiplatform.googleapis.com")
+                };
+                format!(
+                    "https://{host}/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict"
+                )
+            }
+        }
+    }
+
+    fn body(&self, request: &ChatRequest<'_>) -> Value {
+        let direct = self.first_party();
+        let mut max_tokens = request.max_tokens;
+        let mut body = json!({
+            "max_tokens": max_tokens,
+            "stream": true,
+            "messages": messages_json(request.messages),
+        });
+        if !request.system.is_empty() {
+            body["system"] = json!([{
+                "type": "text",
+                "text": request.system,
+                "cache_control": {"type": "ephemeral"},
+            }]);
+        }
+        if !request.tools.is_empty() {
+            let mut tools: Vec<Value> = request
+                .tools
+                .iter()
+                .map(|tool| {
+                    let mut value = json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": tool.schema,
+                    });
+                    // Stream large tool inputs (file contents) as they are written.
+                    // Proxies and older cloud deployments reject the field.
+                    if direct {
+                        value["eager_input_streaming"] = json!(true);
+                    }
+                    value
+                })
+                .collect();
+            if let Some(last) = tools.last_mut() {
+                last["cache_control"] = json!({"type": "ephemeral"});
+            }
+            body["tools"] = Value::Array(tools);
+        }
+
+        match thinking_style(request.model) {
+            ThinkingStyle::Adaptive => {
+                body["thinking"] = json!({"type": "adaptive", "display": "summarized"});
+                let effort = match request.effort {
+                    Effort::Default => None,
+                    Effort::Minimal => Some("low"),
+                    other => Some(other.as_str()),
+                };
+                if let Some(effort) = effort {
+                    body["output_config"] = json!({"effort": effort});
+                }
+            }
+            ThinkingStyle::Budget => {
+                let budget = match request.effort {
+                    Effort::Default | Effort::Minimal => None,
+                    Effort::Low => Some(4_096),
+                    Effort::Medium => Some(10_000),
+                    Effort::High => Some(24_000),
+                    Effort::XHigh | Effort::Max => Some(32_000),
+                };
+                if let Some(budget) = budget {
+                    max_tokens = max_tokens.max(budget + 8_192);
+                    body["max_tokens"] = json!(max_tokens);
+                    body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+                }
+            }
+        }
+
+        match &self.platform {
+            #[cfg(feature = "cloud")]
+            Platform::Vertex { .. } => {
+                body["anthropic_version"] = json!("vertex-2023-10-16");
+            }
+            _ => {
+                body["model"] = json!(request.model);
+            }
+        }
+        if direct && supports_fallbacks(request.model) {
+            // Requests a safety classifier declines are retried on a fallback model.
+            body["fallbacks"] = json!("default");
+        }
+        body
+    }
+
+    pub async fn complete(
+        &self,
+        client: &reqwest::Client,
+        request: ChatRequest<'_>,
+        sink: EventSink<'_>,
+    ) -> anyhow::Result<Completion> {
+        let url = self.url(request.model);
+        let body = serde_json::to_vec(&self.body(&request))?;
+        let fallbacks = self.first_party() && supports_fallbacks(request.model);
+
+        let response = super::send_with_retry(|| async {
+            let mut builder = client
+                .post(&url)
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream");
+            if self.sends_version_header() {
+                builder = builder.header("anthropic-version", "2023-06-01");
+            }
+            if fallbacks {
+                builder = builder.header("anthropic-beta", "server-side-fallback-2026-07-01");
+            }
+            for (name, value) in &self.headers {
+                builder = builder.header(name, value);
+            }
+            builder = match &self.auth {
+                Auth::ApiKey(key) => builder.header("x-api-key", key),
+                Auth::Bearer(token) => builder.bearer_auth(token),
+                #[cfg(feature = "cloud")]
+                Auth::Google => builder.bearer_auth(google_access_token().await?),
+                #[cfg(feature = "cloud")]
+                Auth::SigV4 {
+                    credentials,
+                    service,
+                } => {
+                    let Platform::Bedrock { region } = &self.platform else {
+                        return Err(anyhow!("SigV4 is only used with Bedrock"));
+                    };
+                    let (access_key, secret_key, session_token) = credentials.resolve().await?;
+                    let headers = super::sigv4::sign(&super::sigv4::SignInput {
+                        method: "POST",
+                        url: &url,
+                        body: &body,
+                        region,
+                        service,
+                        access_key: &access_key,
+                        secret_key: &secret_key,
+                        session_token: session_token.as_deref(),
+                    })?;
+                    headers.into_iter().fold(builder, |builder, (name, value)| {
+                        builder.header(name, value)
+                    })
+                }
+                Auth::None => builder,
+            };
+            Ok(builder.body(body.clone()))
+        })
+        .await?;
+
+        read_stream(response, sink).await
+    }
+
+    /// The models a first-party-style endpoint lists at `GET /v1/models`. Bedrock and
+    /// Vertex don't serve that list; they return `None`.
+    pub async fn list_models(
+        &self,
+        client: &reqwest::Client,
+    ) -> anyhow::Result<Option<Vec<String>>> {
+        #[allow(irrefutable_let_patterns)]
+        let Platform::Direct { base_url } = &self.platform else {
+            return Ok(None);
+        };
+        let base = base_url.trim_end_matches('/');
+        let url = if base.ends_with("/v1") {
+            format!("{base}/models?limit=100")
+        } else {
+            format!("{base}/v1/models?limit=100")
+        };
+        let mut builder = client
+            .get(url)
+            .header("anthropic-version", "2023-06-01")
+            .timeout(Duration::from_secs(15));
+        for (name, value) in &self.headers {
+            builder = builder.header(name, value);
+        }
+        builder = match &self.auth {
+            Auth::ApiKey(key) => builder.header("x-api-key", key),
+            Auth::Bearer(token) => builder.bearer_auth(token),
+            _ => builder,
+        };
+        let response = builder.send().await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(super::http_error(response).await);
+        }
+        let json: Value = response.json().await?;
+        Ok(Some(
+            json["data"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|m| m["id"].as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ))
+    }
+}
+
+/// Translates history into Messages API JSON, merging consecutive turns of one role.
+fn messages_json(messages: &[Message]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for message in messages {
+        let role = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        let blocks: Vec<Value> = message.parts.iter().filter_map(part_json).collect();
+        if blocks.is_empty() {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if last["role"] == role => {
+                last["content"]
+                    .as_array_mut()
+                    .expect("content is an array")
+                    .extend(blocks);
+            }
+            _ => out.push(json!({"role": role, "content": blocks})),
+        }
+    }
+    // Cache the conversation so far: the next request reads it back.
+    if let Some(block) = out
+        .last_mut()
+        .and_then(|m| m["content"].as_array_mut())
+        .and_then(|c| c.last_mut())
+    {
+        block["cache_control"] = json!({"type": "ephemeral"});
+    }
+    out
+}
+
+fn part_json(part: &Part) -> Option<Value> {
+    Some(match part {
+        Part::Text { text } if text.is_empty() => return None,
+        Part::Text { text } => json!({"type": "text", "text": text}),
+        Part::Thinking {
+            redacted: Some(data),
+            ..
+        } => json!({"type": "redacted_thinking", "data": data}),
+        // Thinking blocks go back unchanged, signature and all; reasoning from other
+        // providers has no signature and is dropped.
+        Part::Thinking {
+            text,
+            signature: Some(signature),
+            ..
+        } => json!({"type": "thinking", "thinking": text, "signature": signature}),
+        Part::Thinking { .. } => return None,
+        Part::ToolUse { id, name, input } => {
+            json!({"type": "tool_use", "id": id, "name": name, "input": input})
+        }
+        Part::ToolResult {
+            id,
+            content,
+            is_error,
+        } => json!({
+            "type": "tool_result",
+            "tool_use_id": id,
+            "content": if content.is_empty() { "(no output)" } else { content },
+            "is_error": is_error,
+        }),
+    })
+}
+
+enum Block {
+    Text(String),
+    Thinking {
+        text: String,
+        signature: String,
+    },
+    Redacted(String),
+    Tool {
+        id: String,
+        name: String,
+        json: String,
+    },
+    Other,
+}
+
+async fn read_stream(
+    response: reqwest::Response,
+    sink: EventSink<'_>,
+) -> anyhow::Result<Completion> {
+    let mut reader = SseReader::new(response);
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut usage = Usage::default();
+    let mut stop = StopReason::EndTurn;
+
+    while let Some(event) = reader.next().await? {
+        if event.data.is_empty() || event.data == "[DONE]" {
+            continue;
+        }
+        let data: Value = serde_json::from_str(&event.data)
+            .with_context(|| format!("bad stream event: {}", event.data))?;
+        match data["type"].as_str().unwrap_or_default() {
+            "message_start" => {
+                let u = &data["message"]["usage"];
+                usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
+                usage.cache_read_tokens = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                usage.cache_write_tokens = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
+            }
+            "content_block_start" => {
+                let index = data["index"].as_u64().unwrap_or(0) as usize;
+                let block = &data["content_block"];
+                let new = match block["type"].as_str().unwrap_or_default() {
+                    "text" => Block::Text(block["text"].as_str().unwrap_or_default().to_owned()),
+                    "thinking" => Block::Thinking {
+                        text: block["thinking"].as_str().unwrap_or_default().to_owned(),
+                        signature: block["signature"].as_str().unwrap_or_default().to_owned(),
+                    },
+                    "redacted_thinking" => {
+                        Block::Redacted(block["data"].as_str().unwrap_or_default().to_owned())
+                    }
+                    "tool_use" => {
+                        let id = block["id"].as_str().unwrap_or_default().to_owned();
+                        let name = block["name"].as_str().unwrap_or_default().to_owned();
+                        sink(StreamEvent::ToolStart {
+                            id: id.clone(),
+                            name: name.clone(),
+                        });
+                        Block::Tool {
+                            id,
+                            name,
+                            json: String::new(),
+                        }
+                    }
+                    _ => Block::Other,
+                };
+                while blocks.len() <= index {
+                    blocks.push(Block::Other);
+                }
+                blocks[index] = new;
+            }
+            "content_block_delta" => {
+                let index = data["index"].as_u64().unwrap_or(0) as usize;
+                let delta = &data["delta"];
+                let Some(block) = blocks.get_mut(index) else {
+                    continue;
+                };
+                match (delta["type"].as_str().unwrap_or_default(), block) {
+                    ("text_delta", Block::Text(text)) => {
+                        let piece = delta["text"].as_str().unwrap_or_default();
+                        text.push_str(piece);
+                        sink(StreamEvent::Text(piece.to_owned()));
+                    }
+                    ("thinking_delta", Block::Thinking { text, .. }) => {
+                        let piece = delta["thinking"].as_str().unwrap_or_default();
+                        text.push_str(piece);
+                        sink(StreamEvent::Thinking(piece.to_owned()));
+                    }
+                    ("signature_delta", Block::Thinking { signature, .. }) => {
+                        signature.push_str(delta["signature"].as_str().unwrap_or_default());
+                    }
+                    ("input_json_delta", Block::Tool { json, .. }) => {
+                        json.push_str(delta["partial_json"].as_str().unwrap_or_default());
+                    }
+                    _ => {}
+                }
+            }
+            "message_delta" => {
+                if let Some(output) = data["usage"]["output_tokens"].as_u64() {
+                    usage.output_tokens = output;
+                }
+                if let Some(reason) = data["delta"]["stop_reason"].as_str() {
+                    stop = match reason {
+                        "end_turn" | "stop_sequence" => StopReason::EndTurn,
+                        "tool_use" => StopReason::ToolUse,
+                        "max_tokens" => StopReason::MaxTokens,
+                        "refusal" => StopReason::Refusal(
+                            data["delta"]["stop_details"]["explanation"]
+                                .as_str()
+                                .map(str::to_owned),
+                        ),
+                        other => StopReason::Other(other.to_owned()),
+                    };
+                }
+            }
+            "error" => {
+                let message = data["error"]["message"].as_str().unwrap_or("stream error");
+                return Err(anyhow!("{message}"));
+            }
+            _ => {}
+        }
+    }
+
+    let parts = blocks
+        .into_iter()
+        .filter_map(|block| match block {
+            Block::Text(text) => Some(Part::Text { text }),
+            Block::Thinking { text, signature } => Some(Part::Thinking {
+                text,
+                signature: (!signature.is_empty()).then_some(signature),
+                redacted: None,
+            }),
+            Block::Redacted(data) => Some(Part::Thinking {
+                text: String::new(),
+                signature: None,
+                redacted: Some(data),
+            }),
+            Block::Tool { id, name, json } => {
+                // With eager input streaming the input is not validated server-side;
+                // invalid JSON reaches the tool runner as an error marker.
+                let input = if json.trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(&json)
+                        .unwrap_or_else(|_| json!({ "__invalid_json": json }))
+                };
+                Some(Part::ToolUse { id, name, input })
+            }
+            Block::Other => None,
+        })
+        .collect();
+
+    Ok(Completion {
+        message: Message {
+            role: Role::Assistant,
+            parts,
+        },
+        stop,
+        usage,
+    })
+}
+
+#[cfg(feature = "cloud")]
+/// A Google access token for Vertex AI, cached for 45 minutes.
+pub async fn google_access_token() -> anyhow::Result<String> {
+    static CACHE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+    if let Ok(token) = std::env::var("GOOGLE_OAUTH_ACCESS_TOKEN") {
+        return Ok(token);
+    }
+    if let Some((token, at)) = CACHE.lock().unwrap().clone()
+        && at.elapsed() < Duration::from_secs(45 * 60)
+    {
+        return Ok(token);
+    }
+    let output = tokio::process::Command::new("gcloud")
+        .args(["auth", "print-access-token"])
+        .output()
+        .await
+        .context("Vertex AI needs GOOGLE_OAUTH_ACCESS_TOKEN or the gcloud CLI")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "gcloud auth print-access-token failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    *CACHE.lock().unwrap() = Some((token.clone(), Instant::now()));
+    Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::ToolSpec;
+
+    fn request<'a>(
+        model: &'a str,
+        messages: &'a [Message],
+        tools: &'a [ToolSpec],
+        effort: Effort,
+    ) -> ChatRequest<'a> {
+        ChatRequest {
+            model,
+            system: "sys",
+            messages,
+            tools,
+            effort,
+            max_tokens: 1000,
+        }
+    }
+
+    fn history() -> Vec<Message> {
+        vec![
+            Message::user_text("hi"),
+            Message {
+                role: Role::Assistant,
+                parts: vec![
+                    Part::Thinking {
+                        text: "hmm".into(),
+                        signature: Some("sig".into()),
+                        redacted: None,
+                    },
+                    Part::Thinking {
+                        text: "other provider".into(),
+                        signature: None,
+                        redacted: None,
+                    },
+                    Part::ToolUse {
+                        id: "t1".into(),
+                        name: "read".into(),
+                        input: json!({"path": "a"}),
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                parts: vec![Part::ToolResult {
+                    id: "t1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                }],
+            },
+        ]
+    }
+
+    #[cfg(feature = "cloud")]
+    #[test]
+    fn first_party_body_replays_signed_thinking_and_sets_effort() {
+        let endpoint = AnthropicEndpoint {
+            platform: Platform::Direct {
+                base_url: "https://api.anthropic.com".into(),
+            },
+            auth: Auth::None,
+            headers: vec![],
+        };
+        let messages = history();
+        let tools = [ToolSpec {
+            name: "read".into(),
+            description: "d".into(),
+            schema: json!({"type": "object"}),
+        }];
+        let body = endpoint.body(&request(
+            "claude-opus-5-5",
+            &messages,
+            &tools,
+            Effort::XHigh,
+        ));
+        assert_eq!(body["model"], "claude-opus-5-5");
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "xhigh");
+        assert_eq!(body["fallbacks"], "default");
+        assert_eq!(body["tools"][0]["eager_input_streaming"], true);
+        let assistant = &body["messages"][1]["content"];
+        // The signed block goes back; unsigned reasoning from elsewhere is dropped.
+        assert_eq!(assistant.as_array().unwrap().len(), 2);
+        assert_eq!(assistant[0]["signature"], "sig");
+        assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "t1");
+        assert!(body["messages"][2]["content"][0]["cache_control"].is_object());
+    }
+
+    #[cfg(feature = "cloud")]
+    #[test]
+    fn vertex_and_bedrock_shapes() {
+        let messages = history();
+        let vertex = AnthropicEndpoint {
+            platform: Platform::Vertex {
+                project: "p".into(),
+                region: "global".into(),
+            },
+            auth: Auth::None,
+            headers: vec![],
+        };
+        let body = vertex.body(&request(
+            "claude-sonnet-5-5",
+            &messages,
+            &[],
+            Effort::Default,
+        ));
+        assert!(body.get("model").is_none());
+        assert_eq!(body["anthropic_version"], "vertex-2023-10-16");
+        assert!(body.get("output_config").is_none());
+        assert!(body.get("fallbacks").is_none());
+        assert_eq!(
+            vertex.url("claude-sonnet-5-5"),
+            "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/anthropic/models/claude-sonnet-5-5:streamRawPredict"
+        );
+        let bedrock = AnthropicEndpoint {
+            platform: Platform::Bedrock {
+                region: "us-west-2".into(),
+            },
+            auth: Auth::None,
+            headers: vec![],
+        };
+        assert_eq!(
+            bedrock.url("x"),
+            "https://bedrock-mantle.us-west-2.api.aws/anthropic/v1/messages"
+        );
+        let body = bedrock.body(&request(
+            "anthropic.claude-opus-5-5",
+            &messages,
+            &[],
+            Effort::Low,
+        ));
+        assert_eq!(body["model"], "anthropic.claude-opus-5-5");
+        assert!(body.get("fallbacks").is_none());
+    }
+
+    #[test]
+    fn legacy_models_use_budget_tokens() {
+        let endpoint = AnthropicEndpoint {
+            platform: Platform::Direct {
+                base_url: "https://api.anthropic.com".into(),
+            },
+            auth: Auth::None,
+            headers: vec![],
+        };
+        let messages = history();
+        let body = endpoint.body(&request("claude-haiku-4-5", &messages, &[], Effort::Medium));
+        assert_eq!(body["thinking"]["budget_tokens"], 10_000);
+        assert!(body["max_tokens"].as_u64().unwrap() > 10_000);
+        assert!(body.get("output_config").is_none());
+    }
+}

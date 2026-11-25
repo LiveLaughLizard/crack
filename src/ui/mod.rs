@@ -1,0 +1,195 @@
+//! The GPUI interface. It looks and behaves like opencode's terminal interface: a
+//! home screen with the logo and prompt, a session screen with the transcript,
+//! prompt and sidebar, and keyboard-driven dialogs.
+
+mod input;
+mod markdown;
+mod picker;
+mod providers;
+mod render;
+mod theme;
+mod view;
+
+use crate::workspace::{Selection, Workspace};
+use gpui::{
+    App, AppContext as _, Application, Bounds, KeyBinding, TitlebarOptions, WindowBounds,
+    WindowOptions, actions, px, size,
+};
+
+actions!(
+    crack,
+    [
+        CommandPalette,
+        Providers,
+        ModelPicker,
+        EffortPicker,
+        AgentPicker,
+        SessionPicker,
+        SkillPicker,
+        Help,
+        NewSession,
+        ToggleSidebar,
+        CycleAgent,
+        CycleEffort,
+        CycleRecentModel,
+        Interrupt,
+        ClearOrQuit,
+        Quit,
+        CopyLast,
+        PageUp,
+        PageDown,
+        ScrollTop,
+        ScrollBottom,
+        Tab,
+        NewTab,
+        CloseTab,
+        NextTab,
+        PrevTab,
+        SelectTab1,
+        SelectTab2,
+        SelectTab3,
+        SelectTab4,
+        SelectTab5,
+        SelectTab6,
+        SelectTab7,
+        SelectTab8,
+        SelectTab9,
+    ]
+);
+
+pub(crate) const KEYMAP: &[(&str, &str)] = &[
+    ("ctrl-p", "Command palette"),
+    ("ctrl-x p", "Providers: connect API keys and cloud accounts"),
+    ("ctrl-x m", "Switch model"),
+    ("f2", "Cycle recent models"),
+    ("ctrl-t", "Cycle reasoning effort"),
+    ("tab / shift-tab", "Cycle agent (Build / Plan)"),
+    ("ctrl-x a", "Switch agent"),
+    ("ctrl-x n", "New session in this tab"),
+    ("ctrl-x t", "New tab"),
+    ("ctrl-x w", "Close tab"),
+    ("ctrl-tab / ctrl-shift-tab", "Next / previous tab"),
+    ("ctrl-x 1-9", "Go to tab 1-9"),
+    ("ctrl-x l", "Sessions"),
+    ("ctrl-x k", "Skills"),
+    ("ctrl-x b", "Toggle sidebar"),
+    ("ctrl-x y", "Copy last response"),
+    ("ctrl-x h", "Help"),
+    ("esc esc", "Interrupt the running turn"),
+    ("enter", "Send"),
+    ("shift-enter / ctrl-j", "New line"),
+    ("up / down", "Prompt history"),
+    ("pageup / pagedown", "Scroll"),
+    ("ctrl-c", "Clear prompt, or quit when empty"),
+    ("ctrl-x q", "Quit"),
+];
+
+fn bind_keys(cx: &mut App) {
+    input::bind_keys(cx);
+    picker::bind_keys(cx);
+    providers::bind_keys(cx);
+    let ws = Some("Workspace");
+    let prompt = Some("Prompt");
+    cx.bind_keys([
+        KeyBinding::new("ctrl-p", CommandPalette, ws),
+        KeyBinding::new("ctrl-x p", Providers, ws),
+        KeyBinding::new("ctrl-x m", ModelPicker, ws),
+        KeyBinding::new("ctrl-x e", EffortPicker, ws),
+        KeyBinding::new("ctrl-x a", AgentPicker, ws),
+        KeyBinding::new("ctrl-x l", SessionPicker, ws),
+        KeyBinding::new("ctrl-x k", SkillPicker, ws),
+        KeyBinding::new("ctrl-x h", Help, ws),
+        KeyBinding::new("ctrl-x n", NewSession, ws),
+        KeyBinding::new("ctrl-x t", NewTab, ws),
+        KeyBinding::new("ctrl-x w", CloseTab, ws),
+        KeyBinding::new("ctrl-tab", NextTab, ws),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, ws),
+        KeyBinding::new("ctrl-x 1", SelectTab1, ws),
+        KeyBinding::new("ctrl-x 2", SelectTab2, ws),
+        KeyBinding::new("ctrl-x 3", SelectTab3, ws),
+        KeyBinding::new("ctrl-x 4", SelectTab4, ws),
+        KeyBinding::new("ctrl-x 5", SelectTab5, ws),
+        KeyBinding::new("ctrl-x 6", SelectTab6, ws),
+        KeyBinding::new("ctrl-x 7", SelectTab7, ws),
+        KeyBinding::new("ctrl-x 8", SelectTab8, ws),
+        KeyBinding::new("ctrl-x 9", SelectTab9, ws),
+        KeyBinding::new("ctrl-x b", ToggleSidebar, ws),
+        KeyBinding::new("ctrl-x y", CopyLast, ws),
+        KeyBinding::new("ctrl-x q", Quit, ws),
+        KeyBinding::new("ctrl-t", CycleEffort, ws),
+        KeyBinding::new("f2", CycleRecentModel, ws),
+        KeyBinding::new("shift-tab", CycleAgent, ws),
+        KeyBinding::new("tab", Tab, prompt),
+        KeyBinding::new("escape", Interrupt, ws),
+        KeyBinding::new("ctrl-c", ClearOrQuit, ws),
+        KeyBinding::new("pageup", PageUp, ws),
+        KeyBinding::new("pagedown", PageDown, ws),
+        KeyBinding::new("ctrl-g", ScrollTop, ws),
+        KeyBinding::new("ctrl-alt-g", ScrollBottom, ws),
+    ]);
+}
+
+/// Opens the window and runs until it closes.
+pub fn run(
+    workspace: Workspace,
+    selection: Selection,
+    prompt: Option<String>,
+    session: Option<String>,
+) {
+    // Start the async runtime before the window, on its own threads.
+    crate::runtime::get();
+    theme::init_palette(workspace.config.theme.as_deref());
+    Application::new().run(move |cx: &mut App| {
+        theme::init_font(cx);
+        bind_keys(cx);
+        cx.on_action(|_: &Quit, cx| cx.quit());
+
+        let title = format!("crack — {}", workspace.short_cwd());
+        // Wide and not too tall, like a terminal: a share of the screen, within limits.
+        let screen = cx
+            .primary_display()
+            .map(|d| d.bounds().size)
+            .unwrap_or(size(px(1920.), px(1080.)));
+        let default_size = size(
+            (screen.width * 0.6).clamp(px(900.), px(1280.)),
+            (screen.height * 0.6).clamp(px(560.), px(720.)),
+        );
+        // The size the window had last time, kept within the screen.
+        let remembered = crate::state::State::load();
+        let window_size = match (remembered.window_width, remembered.window_height) {
+            (Some(w), Some(h)) => size(
+                px(w).clamp(px(520.), screen.width.max(px(520.))),
+                px(h).clamp(px(380.), screen.height.max(px(380.))),
+            ),
+            _ => default_size,
+        };
+        let bounds = Bounds::centered(None, window_size, cx);
+        let window_bounds = if remembered.window_maximized {
+            WindowBounds::Maximized(bounds)
+        } else {
+            WindowBounds::Windowed(bounds)
+        };
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(window_bounds),
+                    window_min_size: Some(size(px(520.), px(380.))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(title.into()),
+                        ..Default::default()
+                    }),
+                    app_id: Some("crack".into()),
+                    ..Default::default()
+                },
+                move |window, cx| {
+                    cx.new(|cx| {
+                        view::CrackView::new(workspace, selection, prompt, session, window, cx)
+                    })
+                },
+            )
+            .expect("could not open the window");
+        let _ = window.update(cx, |view, window, cx| view.focus_prompt(window, cx));
+        cx.on_window_closed(|cx| cx.quit()).detach();
+        cx.activate(true);
+    });
+}

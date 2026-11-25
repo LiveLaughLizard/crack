@@ -1,0 +1,84 @@
+[package]
+name = "crack"
+version = "0.1.0"
+description = "A GPUI coding agent that behaves like a terminal agent CLI"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[[bin]]
+name = "crack"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = [
+    "font-kit",
+    "wayland",
+    "x11",
+] }
+# gpui -> gpui_http_client -> zed-async-tar -> xattr 0.2.x reads libc::ENOATTR, which
+# libc removed for Linux in 0.2.190. Keep libc below that until gpui ships a fix.
+libc = ">=0.2.1, <0.2.190"
+
+# Command line: GUI by default, `crack run` for headless/CI use.
+flag-rs = "0.10"
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+toml_edit = "0.22"
+dirs = "5"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# Networking runs on its own tokio runtime; results reach the UI over channels.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "stream",
+    "json",
+] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "fs",
+    "io-util",
+    "io-std",
+    "process",
+    "sync",
+    "time",
+    "signal",
+] }
+futures = "0.3"
+bytes = "1"
+
+# Tools: .gitignore-aware walking, globbing, regex search, diffs.
+ignore = "0.4"
+globset = "0.4"
+regex = "1"
+similar = "2"
+
+# AWS SigV4 for Bedrock.
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+# Markdown in assistant messages.
+pulldown-cmark = { version = "0.12", default-features = false }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true
+
+# Which model services the binary can talk to. Excluded services are compiled out.
+#   cargo build                                        everything
+#   cargo build --no-default-features --features cloud  no Chinese services
+#   cargo build --no-default-features                   air-gapped: local servers only
+[features]
+default = ["cloud", "china"]
+# Hosted providers (Anthropic, OpenAI, Gemini, Bedrock, Vertex AI, Azure, OpenRouter, ...)
+# and the webfetch tool.
+cloud = []
+# Chinese model clouds (Qwen, Kimi, Z.ai / GLM, MiniMax, DeepSeek).
+china = ["cloud"]
