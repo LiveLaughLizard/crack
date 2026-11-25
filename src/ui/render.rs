@@ -205,6 +205,11 @@ impl CrackView {
                     .child(div().text_color(theme::muted()).child("·"))
                     .child(div().text_color(theme::warning()).child("accept edits"));
             }
+            crate::policy::Mode::Review => {
+                meta = meta
+                    .child(div().text_color(theme::muted()).child("·"))
+                    .child(div().text_color(theme::secondary()).child("review edits"));
+            }
             #[cfg(feature = "yolo")]
             crate::policy::Mode::Yolo => {
                 meta = meta
@@ -1172,6 +1177,7 @@ impl CrackView {
         let mode_color = match self.selection.mode {
             crate::policy::Mode::Normal => theme::text_soft(),
             crate::policy::Mode::AcceptEdits => theme::warning(),
+            crate::policy::Mode::Review => theme::secondary(),
             #[cfg(feature = "yolo")]
             crate::policy::Mode::Yolo => theme::error(),
         };
@@ -1906,6 +1912,56 @@ impl CrackView {
         for (line, color) in preview {
             code = code.child(div().text_color(color).child(line));
         }
+        // A file change: each hunk with a tick box, so parts can be kept or rejected.
+        let review = self.review_hunks.get(&self.tab_id).cloned();
+        if let Some((hunks, ticked)) = &review {
+            code = div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .bg(theme::bg())
+                .rounded(px(4.))
+                .px(px(12.))
+                .py(px(8.))
+                .text_size(theme::SMALL_SIZE)
+                .child(
+                    div()
+                        .text_color(theme::text_soft())
+                        .child(input["path"].as_str().unwrap_or_default().to_owned()),
+                );
+            for (i, hunk) in hunks.iter().enumerate().take(12) {
+                let on = ticked.get(i).copied().unwrap_or(true);
+                let mut block = div().flex().flex_col().child(
+                    div()
+                        .id(("hunk", i))
+                        .cursor_pointer()
+                        .text_color(if on { theme::text() } else { theme::muted() })
+                        .hover(|d| d.text_color(theme::primary()))
+                        .child(format!(
+                            "{} change {} \u{b7} line {}{}",
+                            if on { "[x]" } else { "[ ]" },
+                            i + 1,
+                            hunk.line,
+                            if on { "" } else { " \u{b7} rejected" }
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_hunk(i, cx))),
+                );
+                for (kind, text) in hunk.lines.iter().take(14) {
+                    let color = match (kind, on) {
+                        (_, false) => theme::muted(),
+                        ('-', _) => theme::diff_removed(),
+                        ('+', _) => theme::diff_added(),
+                        _ => theme::diff_context(),
+                    };
+                    block = block.child(div().text_color(color).child(format!("{kind} {text}")));
+                }
+                code = code.child(block);
+            }
+        }
+        let partial = review
+            .as_ref()
+            .map(|(_, t)| (t.iter().filter(|x| **x).count(), t.len()))
+            .filter(|(_, n)| *n > 1);
         let rule = request.suggestion.clone();
         Some(
             div()
@@ -1920,6 +1976,11 @@ impl CrackView {
                 }))
                 .on_action(cx.listener(|this, _: &ApproveAlways, window, cx| {
                     this.answer_approval(super::view::ApprovalChoice::Always, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ApprovePartial, window, cx| {
+                    if this.review_hunks.contains_key(&this.tab_id) {
+                        this.answer_approval(super::view::ApprovalChoice::Partial, window, cx)
+                    }
                 }))
                 .on_action(cx.listener(|this, _: &DenyApproval, window, cx| {
                     this.answer_approval(super::view::ApprovalChoice::Deny, window, cx)
@@ -1995,6 +2056,25 @@ impl CrackView {
                                             cx,
                                         )
                                     })),
+                            )
+                        })
+                        .when_some(partial, |row, (kept, total)| {
+                            row.child(
+                                button(
+                                    "approve-partial",
+                                    "p",
+                                    format!("Apply selected ({kept} of {total})"),
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.answer_approval(
+                                            super::view::ApprovalChoice::Partial,
+                                            window,
+                                            cx,
+                                        )
+                                    },
+                                )),
                             )
                         })
                         .child(

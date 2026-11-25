@@ -151,6 +151,11 @@ impl CrackView {
                         "Accept edits: file edits never ask",
                         mode == crate::policy::Mode::AcceptEdits,
                     ),
+                    choice(
+                        "review",
+                        "Review edits: see each change and keep it hunk by hunk",
+                        mode == crate::policy::Mode::Review,
+                    ),
                 ];
                 #[cfg(feature = "yolo")]
                 list.push(choice(
@@ -234,6 +239,7 @@ impl CrackView {
             }
             "mode" => match value {
                 "accept-edits" => self.set_mode(crate::policy::Mode::AcceptEdits, cx),
+                "review" => self.set_mode(crate::policy::Mode::Review, cx),
                 #[cfg(feature = "yolo")]
                 "yolo" => self.set_mode(crate::policy::Mode::Yolo, cx),
                 _ => self.set_mode(crate::policy::Mode::Normal, cx),

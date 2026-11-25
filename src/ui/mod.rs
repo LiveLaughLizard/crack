@@ -65,6 +65,7 @@ actions!(
         SelectTab9,
         ApproveOnce,
         ApproveSession,
+        ApprovePartial,
         ApproveAlways,
         DenyApproval,
     ]
@@ -147,6 +148,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("y", ApproveOnce, Some("Approval")),
         KeyBinding::new("enter", ApproveOnce, Some("Approval")),
         KeyBinding::new("a", ApproveSession, Some("Approval")),
+        KeyBinding::new("p", ApprovePartial, Some("Approval")),
         KeyBinding::new("shift-a", ApproveAlways, Some("Approval")),
         KeyBinding::new("n", DenyApproval, Some("Approval")),
         KeyBinding::new("escape", DenyApproval, Some("Approval")),

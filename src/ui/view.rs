@@ -78,6 +78,11 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
         "Accept edits: file edits in the project never ask",
         &["acceptedits"],
     ),
+    (
+        "review",
+        "Review edits: approve each file change, hunk by hunk",
+        &["review-edits"],
+    ),
     ("normal", "Normal mode: ask before risky actions", &[]),
     ("sandbox", "Sandbox shell commands: on / off", &[]),
     (
@@ -169,6 +174,8 @@ pub struct CrackView {
     pub(super) session_rules: Arc<Mutex<Vec<String>>>,
     /// Tool calls waiting for approval, by tab.
     pub(super) approvals: HashMap<u64, agent::ApprovalRequest>,
+    /// For a file change waiting on approval: its hunks and which are ticked.
+    pub(super) review_hunks: HashMap<u64, (Vec<crate::review::Hunk>, Vec<bool>)>,
     pub(super) approval_focus: gpui::FocusHandle,
     /// Move focus to the approval card on the next frame.
     pub(super) focus_approval: bool,
@@ -277,6 +284,7 @@ impl CrackView {
             todos,
             session_rules: Arc::default(),
             approvals: HashMap::new(),
+            review_hunks: HashMap::new(),
             approval_focus: cx.focus_handle(),
             focus_approval: false,
             window_active: true,
@@ -836,6 +844,7 @@ impl CrackView {
             Some("tab") => self.new_tab(window, cx),
             Some("yolo") => self.toggle_yolo(cx),
             Some("accept-edits") => self.set_mode(crate::policy::Mode::AcceptEdits, cx),
+            Some("review") => self.set_mode(crate::policy::Mode::Review, cx),
             Some("normal") => self.set_mode(crate::policy::Mode::Normal, cx),
             Some("sandbox") => self.toggle_sandbox(false, cx),
             Some("sandbox-network") => self.toggle_sandbox(true, cx),
@@ -1561,7 +1570,9 @@ impl CrackView {
             "skills" | "init" | "reload" | "cd" | "compact" | "undo" | "redo" | "diff"
             | "trust-hooks" | "commit" | "memory" | "remember" | "export-memory" | "usage"
             | "extensions" | "plugin" => "Project",
-            "yolo" | "accept-edits" | "normal" | "sandbox" | "sandbox-network" => "Safety",
+            "yolo" | "accept-edits" | "review" | "normal" | "sandbox" | "sandbox-network" => {
+                "Safety"
+            }
             _ => "System",
         };
         let mut items: Vec<PickerItem> = COMMANDS
@@ -2266,6 +2277,8 @@ pub(super) enum ApprovalChoice {
     Session,
     Always,
     Deny,
+    /// Apply only the ticked hunks.
+    Partial,
 }
 
 /// Commands that only exist in some builds.
@@ -2297,6 +2310,18 @@ impl CrackView {
                 .stderr(std::process::Stdio::null())
                 .spawn();
         }
+        // File changes are shown hunk by hunk, each one ticked to start with.
+        self.review_hunks.remove(&tab);
+        if matches!(request.tool.as_str(), "edit" | "write")
+            && let Some(proposal) =
+                crate::review::proposal(&request.tool, &request.input, &self.ws.cwd)
+        {
+            let hunks = crate::review::hunks(&proposal.old, &proposal.new);
+            if !hunks.is_empty() {
+                let ticked = vec![true; hunks.len()];
+                self.review_hunks.insert(tab, (hunks, ticked));
+            }
+        }
         self.approvals.insert(tab, request);
         cx.notify();
     }
@@ -2310,6 +2335,7 @@ impl CrackView {
         let Some(request) = self.approvals.remove(&self.tab_id) else {
             return;
         };
+        let review = self.review_hunks.remove(&self.tab_id);
         // Without a rule to offer (commits), every yes is a yes for this time only.
         let choice = match choice {
             ApprovalChoice::Session | ApprovalChoice::Always if request.suggestion.is_empty() => {
@@ -2343,6 +2369,15 @@ impl CrackView {
                 crate::policy::Answer::Always(request.suggestion.clone())
             }
             ApprovalChoice::Deny => crate::policy::Answer::Deny(None),
+            ApprovalChoice::Partial => match review {
+                Some((_, ticked)) if ticked.iter().all(|t| *t) => crate::policy::Answer::Once,
+                Some((_, ticked)) if ticked.iter().any(|t| *t) => {
+                    crate::policy::Answer::Partial(ticked)
+                }
+                _ => crate::policy::Answer::Deny(Some(
+                    "the user rejected every part of this change".into(),
+                )),
+            },
         };
         let _ = request.respond.send(answer);
         self.focus_prompt(window, cx);
@@ -2461,5 +2496,17 @@ impl CrackView {
         let files = std::sync::Arc::new(files);
         self.file_cache = Some((Instant::now(), files.clone()));
         files
+    }
+}
+
+impl CrackView {
+    /// Ticks or unticks one hunk of the file change waiting on approval.
+    pub(super) fn toggle_hunk(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some((_, ticked)) = self.review_hunks.get_mut(&self.tab_id)
+            && let Some(t) = ticked.get_mut(index)
+        {
+            *t = !*t;
+            cx.notify();
+        }
     }
 }

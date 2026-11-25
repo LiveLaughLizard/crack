@@ -479,7 +479,7 @@ pub(crate) async fn turn_loop(
             outcome: Option<tools::ToolOutput>,
         }
         let mut prepared = Vec::new();
-        for (id, name, input) in calls {
+        for (id, mut name, input) in calls {
             let _ = events.send(AgentEvent::ToolCall {
                 id: id.clone(),
                 name: name.clone(),
@@ -507,7 +507,12 @@ pub(crate) async fn turn_loop(
                 (true, Some(refused))
             } else {
                 match permit(config, &id, &name, &input, events, pre.permission).await {
-                    Ok(()) => (false, None),
+                    Ok(Some((tool, changed))) => {
+                        name = tool;
+                        input = changed;
+                        (false, None)
+                    }
+                    Ok(None) => (false, None),
                     Err(refusal) => (false, Some(refusal)),
                 }
             };
@@ -631,7 +636,7 @@ async fn permit(
     input: &Value,
     events: &Events,
     hook: Option<crate::hooks::Permission>,
-) -> Result<(), tools::ToolOutput> {
+) -> Result<Option<(String, Value)>, tools::ToolOutput> {
     use crate::policy::{Answer, Decision};
     let rules = config.session_rules.lock().unwrap().clone();
     let decision = config
@@ -651,7 +656,7 @@ async fn permit(
     let title = tools::title(name, input);
     let refuse = |text: String| tools::ToolOutput::refused(text, title.clone());
     match decision {
-        Decision::Allow => Ok(()),
+        Decision::Allow => Ok(None),
         Decision::Deny(reason) => Err(refuse(format!(
             "Not allowed: {reason}. Don't retry this; if you need it, ask the user to change the permission rules."
         ))),
@@ -696,10 +701,20 @@ async fn permit(
                 ));
             }
             match answer.await {
-                Ok(Answer::Once) => Ok(()),
+                Ok(Answer::Once) => Ok(None),
                 Ok(Answer::Session(rule)) | Ok(Answer::Always(rule)) => {
                     config.session_rules.lock().unwrap().push(rule);
-                    Ok(())
+                    Ok(None)
+                }
+                // Only some hunks: write exactly those, and tell the model what was kept.
+                Ok(Answer::Partial(selected)) => {
+                    match crate::review::proposal(name, input, &config.policy.cwd) {
+                        Some(proposal) => Ok(Some((
+                            "write".to_owned(),
+                            crate::review::partial_input(&proposal, &config.policy.cwd, &selected),
+                        ))),
+                        None => Ok(None),
+                    }
                 }
                 Ok(Answer::Deny(note)) => Err(refuse(match note {
                     Some(note) => format!("The user denied this: {note}"),

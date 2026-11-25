@@ -864,11 +864,16 @@ async fn write(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
     }
     tokio::fs::write(&path, content).await?;
     let lines = content.lines().count();
+    let mut message = format!(
+        "{} {shown} ({lines} lines).",
+        if existed { "Overwrote" } else { "Created" }
+    );
+    // A change the user only partly accepted (review mode).
+    if let Some(note) = str_arg(input, "__review_note") {
+        message = format!("{note}\n\n{message}");
+    }
     Ok(ToolOutput::ok(
-        format!(
-            "{} {shown} ({lines} lines).",
-            if existed { "Overwrote" } else { "Created" }
-        ),
+        message,
         ToolMeta {
             kind: DisplayKind::Write,
             title: format!("Wrote {shown}"),

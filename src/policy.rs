@@ -48,6 +48,8 @@ pub enum Mode {
     Normal,
     /// Edits inside the project never ask.
     AcceptEdits,
+    /// Every file change asks, showing its hunks to keep or reject one by one.
+    Review,
     /// Everything runs without asking, except deny rules. Not in strict builds.
     #[cfg(feature = "yolo")]
     Yolo,
@@ -58,6 +60,7 @@ impl Mode {
         match self {
             Mode::Normal => "normal",
             Mode::AcceptEdits => "accept edits",
+            Mode::Review => "review edits",
             #[cfg(feature = "yolo")]
             Mode::Yolo => "YOLO",
         }
@@ -67,6 +70,7 @@ impl Mode {
         match value.trim().to_ascii_lowercase().as_str() {
             "normal" | "ask" | "default" => Some(Mode::Normal),
             "accept-edits" | "accept_edits" | "acceptedits" => Some(Mode::AcceptEdits),
+            "review" | "review-edits" | "review_edits" => Some(Mode::Review),
             #[cfg(feature = "yolo")]
             "yolo" | "auto" | "bypass" => Some(Mode::Yolo),
             _ => None,
@@ -688,6 +692,10 @@ impl Policy {
         {
             return Decision::Ask("renames change every file that uses the symbol".into());
         }
+        // Review mode: every file change is shown and asked about, rules or not.
+        if self.mode == Mode::Review && matches!(tool, "edit" | "write" | "multiedit") {
+            return Decision::Ask("review mode: you approve each change".into());
+        }
         // Commits are never automatic, not even in YOLO mode.
         if tool == "git_commit" {
             return Decision::Ask("commits always ask first".into());
@@ -801,6 +809,8 @@ pub enum Answer {
     /// Allow it from now on: save the rule to the project config.
     Always(String),
     Deny(Option<String>),
+    /// Apply only these hunks of a file change (review mode).
+    Partial(Vec<bool>),
 }
 
 /// The effective sandbox settings.
