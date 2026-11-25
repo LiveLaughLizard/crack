@@ -417,10 +417,14 @@ impl Picker {
 
     /// Removes an item after the owner deleted what it stands for.
     pub fn remove_item(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.items.retain(|i| i.id != id);
         self.all_items.retain(|i| i.id != id);
         self.armed_delete = None;
         self.refilter(cx);
+        // After refiltering: a search may still find it until the delete is written.
+        self.items.retain(|i| i.id != id);
+        self.filtered = (0..self.items.len()).collect();
+        self.selected = self.selected.min(self.items.len().saturating_sub(1));
+        cx.notify();
     }
 
     /// The first ctrl-d arms the selected item; a second one deletes it.

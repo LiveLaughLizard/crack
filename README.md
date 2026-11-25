@@ -175,8 +175,16 @@ Slash commands: `/connect`, `/new`, `/sessions`, `/models`, `/effort [level]`, `
 `/cd <dir>`, `/sidebar`, `/tab`, `/close`, `/mcp`, `/help`, `/exit`, and
 `/<skill-name> [request]`.
 
-Sessions are saved in `~/.local/share/crack/sessions` and listed per project.
-`crack -s last` reopens the latest one.
+Sessions are saved in a SQLite database, `~/.local/share/crack/crack.db` (or
+`$CRACK_DATA_DIR`), as they happen, so a crash loses at most the last few events.
+They're listed per project. In the Sessions picker (`ctrl-x l`):
+
+- typing searches the conversations themselves, not just titles;
+- `ctrl-d` pressed twice deletes a session.
+
+`crack -s last` reopens the latest session, and a plain launch reopens the tabs that
+were open when you last quit. Sessions saved as JSON by older versions are imported on
+first start; the old files are kept in `sessions.imported/`.
 
 **Tabs.** Each tab is a session. A turn keeps running when you switch to another tab:
 running tabs show a spinner, and a note appears when a background tab finishes. Click a
