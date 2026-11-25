@@ -56,6 +56,8 @@ jobs:
   # catch breakage until they're tested on real machines).
   other-platforms:
     name: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: never
     strategy:
       fail-fast: false
       matrix:
@@ -81,10 +83,12 @@ jobs:
           set +e
           cargo clippy --all-targets --message-format=short -- -D warnings 2>&1 | tee clippy.txt
           status=${PIPESTATUS[0]}
-          grep -E '^[^ ]+\.rs:[0-9]+:[0-9]+: (error|warning)' clippy.txt | head -40 |
+          # Every error block (dependencies and build scripts too) as one annotation:
+          # GitHub keeps only ten per step.
+          blocks=$(grep -E -A6 '^error' clippy.txt | head -80 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          [ -n "$blocks" ] && echo "::error title=clippy::$blocks"
+          grep -E '^[^ ]+\.rs:[0-9]+:[0-9]+: (error|warning)' clippy.txt | head -8 |
             sed -E 's/^([^:]+):([0-9]+):([0-9]+): (.*)$/::error file=\1,line=\2,col=\3::\4/'
-          # Errors outside crack's own files (dependencies, build scripts).
-          grep -E -A3 '^error|failed to run custom build|xcrun|metal' clippy.txt | head -30 | sed -E 's/^/::error::/'
           exit $status
 
       - name: Test
@@ -93,7 +97,8 @@ jobs:
           set +e
           cargo test 2>&1 | tee test.txt
           status=${PIPESTATUS[0]}
-          grep -E "panicked at|^test .* FAILED|^error" test.txt | head -40 | sed -E 's/^/::error::/'
+          blocks=$(grep -E -A6 "panicked at|^test .* FAILED|^error" test.txt | head -80 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          [ -n "$blocks" ] && echo "::error title=tests::$blocks"
           exit $status
 
       - name: Headless smoke test against the mock
