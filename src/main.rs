@@ -498,6 +498,9 @@ fn main() {
     };
     let guard = logging::init(stderr_log.as_deref());
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "crack starting");
+    if matches!(mode, Mode::Gui { .. } | Mode::Run { .. }) {
+        crate::recovery::reap_orphans();
+    }
     let result = dispatch(mode, &cli);
     // Exiting skips destructors: flush the log first.
     drop(guard);

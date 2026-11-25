@@ -48,3 +48,64 @@ pub fn repair(id: &str, cwd: &std::path::Path) -> anyhow::Result<Session> {
     tracing::info!(session = id, "repaired an interrupted turn");
     Ok(session)
 }
+
+/// When a process started, in clock ticks since boot (field 22 of /proc/<pid>/stat), so
+/// a reused pid isn't mistaken for the one recorded.
+#[cfg(target_os = "linux")]
+fn start_time(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name (field 2) can hold spaces; fields after it follow the last ')'.
+    let rest = &stat[stat.rfind(')')? + 2..];
+    rest.split_whitespace().nth(19).map(str::to_owned)
+}
+
+/// Records a running shell command's process group, so that if crack is killed before
+/// the command ends, the next start can stop what it left running.
+pub fn track_group(pgid: u32) {
+    #[cfg(target_os = "linux")]
+    if let Some(started) = start_time(pgid) {
+        crate::store::get().set_kv(
+            &format!("pgroup:{pgid}"),
+            format!("{} {started}", std::process::id()),
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = pgid;
+}
+
+pub fn untrack_group(pgid: u32) {
+    crate::store::get().set_kv(&format!("pgroup:{pgid}"), String::new());
+}
+
+/// Stops process groups left by a crack that no longer runs. Returns how many.
+pub fn reap_orphans() -> usize {
+    let mut reaped = 0;
+    #[cfg(target_os = "linux")]
+    for (key, value) in crate::store::get().kv_prefix("pgroup:") {
+        let Some((owner, started)) = value.split_once(' ') else {
+            continue;
+        };
+        let (Ok(pgid), Ok(owner)) = (
+            key.trim_start_matches("pgroup:").parse::<u32>(),
+            owner.parse::<i32>(),
+        ) else {
+            continue;
+        };
+        // Its crack is still running (this one or another window): leave it alone.
+        if unsafe { libc::kill(owner, 0) } == 0 {
+            continue;
+        }
+        if start_time(pgid).as_deref() == Some(started) {
+            unsafe {
+                libc::killpg(pgid as i32, libc::SIGKILL);
+            }
+            reaped += 1;
+            tracing::info!(
+                pgid,
+                "stopped a shell command left by a crack that was killed"
+            );
+        }
+        untrack_group(pgid);
+    }
+    reaped
+}

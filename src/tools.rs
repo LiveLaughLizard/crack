@@ -571,7 +571,19 @@ fn floor_char(text: &str, mut index: usize) -> usize {
 }
 
 /// Kills a shell command's whole process group when dropped (interrupted or timed out).
-struct KillGroup(Option<u32>);
+/// A shell command's process group: killed if the command is interrupted or times out
+/// (field 0, cleared when it finishes), and recorded while it runs (field 1) so a crack
+/// that is killed outright leaves nothing behind after its next start.
+struct KillGroup(Option<u32>, Option<u32>);
+
+impl KillGroup {
+    fn new(pid: Option<u32>) -> KillGroup {
+        if let Some(pid) = pid {
+            crate::recovery::track_group(pid);
+        }
+        KillGroup(pid, pid)
+    }
+}
 
 impl Drop for KillGroup {
     fn drop(&mut self) {
@@ -580,6 +592,9 @@ impl Drop for KillGroup {
             unsafe {
                 libc::killpg(pid as i32, libc::SIGKILL);
             }
+        }
+        if let Some(pid) = self.1 {
+            crate::recovery::untrack_group(pid);
         }
     }
 }
@@ -632,7 +647,7 @@ async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         // Its own process group, so an interrupted command's children stop too.
         .process_group(0)
         .spawn()?;
-    let mut group = KillGroup(child.id());
+    let mut group = KillGroup::new(child.id());
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
     let collect = async {

@@ -208,9 +208,8 @@ impl AnthropicEndpoint {
     /// Vertex takes the API version in the body instead of a header.
     fn sends_version_header(&self) -> bool {
         #[cfg(feature = "cloud")]
-        if matches!(self.platform, Platform::Vertex { .. }) {
-            return false;
-        }
+        return !matches!(self.platform, Platform::Vertex { .. });
+        #[cfg(not(feature = "cloud"))]
         true
     }
 
