@@ -1115,7 +1115,8 @@ impl CrackView {
         let (sandbox_text, sandbox_color) = match (sandbox.wanted, sandbox.available) {
             (true, true) => (
                 format!(
-                    "on · network {}",
+                    "on ({}) · network {}",
+                    sandbox.backend(),
                     if sandbox.network {
                         "allowed"
                     } else {

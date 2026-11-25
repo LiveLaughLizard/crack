@@ -11,6 +11,7 @@ mod mcp;
 mod policy;
 mod providers;
 mod runtime;
+mod sandbox;
 mod session;
 mod skills;
 mod state;
@@ -352,6 +353,11 @@ fn load_workspace(common: &Common) -> anyhow::Result<(Workspace, Selection)> {
 }
 
 fn main() {
+    // The sandbox helper (crack runs itself to lock a command down) skips everything else.
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.get(1).map(String::as_str) == Some(sandbox::HELPER) {
+        sandbox::run_helper(&raw[2..]);
+    }
     // Behave like other CLI tools when output is piped into `head` and the like.
     #[cfg(unix)]
     unsafe {

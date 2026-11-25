@@ -140,6 +140,7 @@ compiled out entirely: no code, endpoints or hostnames for them are in the binar
 | Full (default) | `cargo build --release` or `just build` | All providers |
 | No Chinese services | `cargo build --release --no-default-features --features cloud` or `just build-no-china` | Everything except Qwen, Kimi, Z.ai, MiniMax and DeepSeek |
 | Air-gapped | `cargo build --release --no-default-features` or `just build-airgap` | Only Ollama, LM Studio and self-hosted OpenAI- or Anthropic-compatible servers you configure; no `webfetch` tool |
+| Strict | `just build-strict` | All providers, no YOLO mode, sandbox always on |
 
 The features are `cloud` (hosted providers and `webfetch`) and `china` (the Chinese
 model clouds; it requires `cloud`). `crack providers` and the home screen show which
@@ -191,6 +192,74 @@ running tabs show a spinner, and a note appears when a background tab finishes. 
 tab to switch to it. Close it with its ×, a middle-click or `ctrl-x w`; closing a
 running tab stops its turn. Opening a session that's already in a tab switches to that
 tab.
+
+## Permissions and the sandbox
+
+Every tool call is checked before it runs. The runtime decides, not the model.
+
+| What | Default |
+|---|---|
+| Reading and searching the project | runs |
+| Editing files in the project | runs (`edits = "ask"` to change it) |
+| Anything outside the project | asks |
+| Secrets (`.env`, keys, `~/.ssh`, `~/.aws`, crack's credentials) | refused for the file tools; shell commands that mention them ask |
+| Shell commands | each part of a pipeline or `&&` chain is checked: known-safe ones (`ls`, `rg`, `git status`, `cargo test`, …) run; dangerous ones (`rm -rf`, `git push`, `sudo`, `curl`, …) ask; others ask, unless the sandbox is on |
+| MCP tools | ask, once per server with "allow for this session" |
+
+**Answering.** When something asks, a card appears above the prompt with the command
+or diff:
+- `y` allows it once;
+- `a` allows it for the rest of the session, using the rule shown (e.g.
+  `Bash(cargo test *)`);
+- `A` always allows it, saving the rule to the project's `.crack/config.toml`;
+- `n` or Esc denies it.
+
+A tab waiting for you shows `!`, and a desktop notification fires if crack isn't in
+front.
+
+**Rules** use Claude Code's syntax. Deny always wins, even in YOLO mode:
+
+```toml
+[permissions]
+allow = ["Bash(npm run *)", "Edit(src/**)", "mcp__github", "WebFetch(domain:docs.rs)"]
+ask   = ["Bash(git commit *)"]
+deny  = ["Bash(git push --force*)", "Read(~/private/**)"]
+edits = "allow"           # or "ask"
+bash  = "ask"             # or "allow" for commands on neither list
+```
+
+**Modes** are in the command palette (`ctrl-p`) and as slash commands:
+- **Normal**
+- **Accept edits:** file edits in the project never ask.
+- **YOLO:** everything runs without asking, except deny rules. The mode shows in red
+  in the prompt bar.
+
+**The sandbox** is on by default. Shell commands can write only to the project, `/tmp`
+and package caches (`~/.cargo/registry`, `~/.cache`, `~/.npm`, …). The rest of the
+system is read-only, and `~/.ssh`, `~/.aws`, `~/.gnupg`, cloud credentials and crack's
+own keys can't be read. crack uses its **built-in sandbox** (Linux Landlock, so there's
+nothing to install, on kernel 5.13 or later). On older kernels it uses
+[bubblewrap](https://github.com/containers/bubblewrap) if installed, and otherwise asks
+before commands.
+
+Because the sandbox confines them, unknown commands don't need to ask. `ctrl-p` has:
+- **Sandbox: on / off**
+- **Sandbox: allow / block network access.** Network is allowed by default so builds
+  can fetch dependencies.
+
+Both choices are remembered. The sidebar's Safety section shows the current mode and
+sandbox.
+
+**Headless.** `crack run` can't ask anyone, so anything that would need approval is
+refused, and the model is told why. Flags:
+- `--permission-mode accept-edits` lets edits through without asking.
+- `--permission-mode auto` is YOLO, for throwaway CI containers.
+- `--sandbox off` turns the sandbox off, for containers without user namespaces.
+
+**Builds for strict environments.** `just build-strict` builds without the `yolo`
+feature, so there's no YOLO mode and no `--permission-mode auto`, and with
+`force-sandbox`, so the sandbox can't be turned off and shell commands are refused if
+no sandbox is available. A human stays in the loop for every risky action.
 
 ## MCP servers
 

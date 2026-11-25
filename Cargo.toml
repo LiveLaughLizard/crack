@@ -93,3 +93,7 @@ yolo = []
 # Always run shell commands in the bubblewrap sandbox; it can't be turned off, and
 # without bwrap shell commands are refused.
 force-sandbox = []
+
+# The built-in sandbox: Landlock (file access) and namespaces (network).
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"

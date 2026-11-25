@@ -498,6 +498,19 @@ fn is_safe(part: &str) -> bool {
         && !DANGER.iter().any(|d| starts_with_words(part, d))
 }
 
+/// A word of the command that names a secret file (`cat .env`, `~/.ssh/id_rsa`).
+fn mentions_secret(part: &str, cwd: &Path) -> Option<String> {
+    part.split_whitespace()
+        .map(|w| {
+            w.trim_matches(['"', '\'', ';'])
+                .trim_start_matches('<')
+                .trim_start_matches('>')
+        })
+        .filter(|w| !w.is_empty() && !w.starts_with('-'))
+        .find(|w| is_secret(&absolutize(&crate::config::expand_home(w), cwd)))
+        .map(str::to_owned)
+}
+
 /// Output redirections to files outside `root` (`> /etc/x`, `>> ~/.bashrc`).
 fn redirects_outside(part: &str, root: &Path, cwd: &Path) -> Option<String> {
     let mut words = part.split_whitespace().peekable();
@@ -686,6 +699,9 @@ impl Policy {
                 Some(format!("the rule `{}` asks first", rule.text))
             } else if let Some(target) = redirects_outside(part, &self.root, &self.cwd) {
                 Some(format!("writes outside the project: {target}"))
+            } else if let Some(secret) = mentions_secret(part, &self.cwd) {
+                // The sandbox can't hide secrets inside the project, like `.env`.
+                Some(format!("touches {secret}, which may hold secrets"))
             } else if self.allow.iter().any(|r| r.matches(&one)) {
                 // Rules the user allowed (in config or this session) beat the built-in lists.
                 None
@@ -774,7 +790,7 @@ impl Sandbox {
         );
         Sandbox {
             wanted,
-            available: bwrap_installed(),
+            available: crate::sandbox::native_available() || bwrap_installed(),
             forced,
             network: state
                 .sandbox_network
@@ -788,14 +804,53 @@ impl Sandbox {
     pub fn active(&self) -> bool {
         self.wanted && self.available
     }
+
+    /// Which sandbox runs commands, for display.
+    pub fn backend(&self) -> &'static str {
+        if crate::sandbox::native_available() {
+            "built-in"
+        } else if bwrap_installed() {
+            "bubblewrap"
+        } else {
+            "none"
+        }
+    }
 }
 
-/// Wraps a shell command so it runs in a bubblewrap sandbox: the system read-only,
-/// the project, /tmp and package caches writable, secrets hidden, and no network
-/// unless allowed.
-pub fn sandboxed(command: &str, settings: &Sandbox, root: &Path) -> Option<Vec<String>> {
-    let bwrap = which("bwrap")?;
+/// Home folders whose contents a sandboxed command can't read.
+pub fn hidden_paths() -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
+    [
+        ".ssh",
+        ".gnupg",
+        ".aws",
+        ".azure",
+        ".kube",
+        ".docker",
+        ".config/gcloud",
+        ".password-store",
+        ".config/crack",
+    ]
+    .iter()
+    .map(|p| home.join(p))
+    .filter(|p| p.exists())
+    .collect()
+}
+
+/// Wraps a shell command so it runs sandboxed: the system read-only, the project,
+/// /tmp and package caches writable, secrets hidden, and no network unless allowed.
+/// Uses the built-in sandbox (Landlock) where the kernel has it, else bubblewrap.
+pub fn sandboxed(command: &str, settings: &Sandbox, root: &Path) -> Option<Vec<String>> {
+    if crate::sandbox::native_available() {
+        let mut writable = vec![
+            root.to_owned(),
+            PathBuf::from("/tmp"),
+            PathBuf::from("/dev"),
+        ];
+        writable.extend(settings.writable.iter().filter(|p| p.exists()).cloned());
+        return crate::sandbox::command(command, &writable, &hidden_paths(), settings.network);
+    }
+    let bwrap = which("bwrap")?;
     let mut args: Vec<String> = vec![
         bwrap.display().to_string(),
         "--ro-bind".into(),
@@ -821,21 +876,8 @@ pub fn sandboxed(command: &str, settings: &Sandbox, root: &Path) -> Option<Vec<S
             ]);
         }
     }
-    for secret in [
-        ".ssh",
-        ".gnupg",
-        ".aws",
-        ".azure",
-        ".kube",
-        ".docker",
-        ".config/gcloud",
-        ".password-store",
-        ".config/crack",
-    ] {
-        let path = home.join(secret);
-        if path.is_dir() {
-            args.extend(["--tmpfs".into(), path.display().to_string()]);
-        }
+    for path in hidden_paths().into_iter().filter(|p| p.is_dir()) {
+        args.extend(["--tmpfs".into(), path.display().to_string()]);
     }
     if !settings.network {
         args.push("--unshare-net".into());
@@ -885,6 +927,13 @@ mod tests {
         assert_eq!(bash(&p, "echo hi > /dev/null"), Decision::Allow);
         assert!(matches!(bash(&p, "git push origin main"), Decision::Ask(_)));
         assert!(matches!(bash(&p, "python script.py"), Decision::Ask(_)));
+        // Secrets inside the project, which the sandbox can't hide.
+        assert!(matches!(bash(&p, "cat .env"), Decision::Ask(_)));
+        assert!(matches!(
+            bash(&p, "grep KEY ~/.ssh/id_ed25519"),
+            Decision::Ask(_)
+        ));
+        assert_eq!(bash(&p, "cat .env.example"), Decision::Allow);
         // Quoted separators are not splits.
         assert_eq!(
             split_command("echo 'a && b'; ls").unwrap(),
