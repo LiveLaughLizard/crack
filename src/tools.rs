@@ -78,6 +78,8 @@ pub struct ToolContext {
     pub lsp_wait: Duration,
     /// How `websearch` searches.
     pub web: Arc<crate::websearch::Settings>,
+    /// Trim long, noisy shell output (the full output is saved to a file).
+    pub trim_output: bool,
 }
 
 /// How the interface draws a finished call.
@@ -765,6 +767,11 @@ async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
             }
             Err(_) => (String::new(), None, true),
         };
+    // Long build and test logs: errors, warnings and the summary, with the rest saved.
+    let text = match ctx.trim_output.then(|| crate::noise::trim(&text)).flatten() {
+        Some(trimmed) => trimmed,
+        None => text,
+    };
     let text = truncate_middle(text.trim_end(), MAX_OUTPUT);
     let mut content = text.clone();
     if timed_out {
@@ -1521,6 +1528,7 @@ mod tests {
             memory: false,
             lsp_wait: Duration::from_secs(3),
             web: Default::default(),
+            trim_output: true,
             mcp: crate::mcp::McpHub::new(Default::default(), reqwest::Client::new()),
             sandbox: None,
         }

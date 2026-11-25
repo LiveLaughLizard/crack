@@ -293,6 +293,12 @@ clear_tool_results = true
 
 If server compaction fails, crack falls back to its own summary.
 
+Long shell output is trimmed before the model sees it: progress bars and repeated lines
+collapse, build chatter (`Compiling ...`, passing tests) goes, and every error,
+warning and failure stays with a few lines of context, plus the summary at the end. The
+full output is saved and the note says where, so the model can read it if it needs to.
+Turn it off with `trim_output = false`.
+
 ## Undo, redo and rewinding
 
 Before a turn first changes anything, crack snapshots the project's files, and it

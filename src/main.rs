@@ -21,6 +21,7 @@ mod logging;
 mod lsp;
 mod mcp;
 mod memory;
+mod noise;
 mod plugins;
 mod policy;
 mod providers;

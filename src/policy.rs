@@ -708,6 +708,8 @@ impl Policy {
         }
         match call.family.as_str() {
             "read" => match &call.subject {
+                // Full outputs of trimmed shell commands.
+                Subject::Path(path) if path.starts_with(crate::noise::dir()) => Decision::Allow,
                 Subject::Path(path) if !path.starts_with(&self.root) => {
                     Decision::Ask(format!("reads outside the project: {}", path.display()))
                 }

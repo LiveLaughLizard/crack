@@ -32,6 +32,8 @@ pub struct Config {
     pub compact_at: Option<f64>,
     /// How `websearch` searches: `auto` (default), `zai`, `searxng`, `duckduckgo` or `off`.
     pub web_search: Option<String>,
+    /// Trim long, noisy shell output before the model sees it (default true).
+    pub trim_output: Option<bool>,
     /// A SearXNG server for `websearch` (needs `format=json` enabled).
     pub searxng_url: Option<String>,
     /// Trim old tool output when the conversation fills this share of the context window
@@ -215,6 +217,9 @@ impl Config {
         }
         if layer.web_search.is_some() {
             self.web_search = layer.web_search;
+        }
+        if layer.trim_output.is_some() {
+            self.trim_output = layer.trim_output;
         }
         if layer.searxng_url.is_some() {
             self.searxng_url = layer.searxng_url;

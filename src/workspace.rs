@@ -178,6 +178,7 @@ impl Workspace {
             memory: self.config.memory.unwrap_or(true),
             lsp_wait: std::time::Duration::from_millis(self.config.lsp_wait_ms.unwrap_or(3000)),
             web: Arc::new(crate::websearch::Settings::from_config(&self.config)),
+            trim_output: self.config.trim_output.unwrap_or(true),
         }
     }
 
