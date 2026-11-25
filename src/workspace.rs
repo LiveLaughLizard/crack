@@ -116,7 +116,8 @@ impl Workspace {
             caps: self.registry.caps(&model_ref),
             model_ref: model_ref.clone(),
             endpoint: provider.endpoint.clone(),
-            hooks: crate::hooks::Hooks::new(&self.config.hooks, &self.cwd, ""),
+            hooks: crate::hooks::Hooks::new(&self.config.hooks, &self.cwd, "")
+                .with_sandbox(crate::policy::Sandbox::resolve(&self.config.permissions)),
             subagents: Some(std::sync::Arc::new(crate::delegate::SubagentEnv::new(
                 self.registry.clone(),
                 &self.cwd,

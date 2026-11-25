@@ -83,6 +83,8 @@ struct Hook {
     timeout: Duration,
     from_project: bool,
     env: Vec<(String, String)>,
+    /// A plugin's hook: run in the sandbox when it's on.
+    plugin: bool,
 }
 
 /// What the hooks for one event decided.
@@ -117,6 +119,8 @@ pub struct Hooks {
     session: String,
     /// Project hooks may run (the user trusted this exact set).
     pub project_trusted: bool,
+    /// Where plugin hooks run (the shell-command sandbox), when it's on.
+    sandbox: Option<crate::policy::Sandbox>,
 }
 
 impl Hooks {
@@ -161,6 +165,7 @@ impl Hooks {
                         timeout: Duration::from_secs(timeout.unwrap_or(60)),
                         from_project: m.from_project,
                         env: m.env.clone(),
+                        plugin: m.plugin.is_some(),
                     });
                 }
             }
@@ -171,7 +176,14 @@ impl Hooks {
             cwd: cwd.to_owned(),
             session: session.to_owned(),
             project_trusted,
+            sandbox: None,
         }
+    }
+
+    /// Plugin hooks run in this sandbox (when it's active).
+    pub fn with_sandbox(mut self, sandbox: crate::policy::Sandbox) -> Hooks {
+        self.sandbox = sandbox.active().then_some(sandbox);
+        self
     }
 
     pub fn set_session(&mut self, session: &str) {
@@ -223,7 +235,9 @@ impl Hooks {
             }
         }
         let input = payload.to_string();
-        let runs = selected.iter().map(|hook| run_one(hook, &self.cwd, &input));
+        let runs = selected
+            .iter()
+            .map(|hook| run_one(hook, &self.cwd, &input, self.sandbox.as_ref()));
         for (hook, result) in selected.iter().zip(futures::future::join_all(runs).await) {
             let label = short(&hook.command);
             match result {
@@ -259,10 +273,32 @@ fn matcher_regex(pattern: &str) -> String {
     }
 }
 
-async fn run_one(hook: &Hook, cwd: &Path, input: &str) -> anyhow::Result<(i32, String, String)> {
+async fn run_one(
+    hook: &Hook,
+    cwd: &Path,
+    input: &str,
+    sandbox: Option<&crate::policy::Sandbox>,
+) -> anyhow::Result<(i32, String, String)> {
     use tokio::io::AsyncWriteExt;
-    let mut child = tokio::process::Command::new("bash")
-        .args(["-c", &hook.command])
+    // Plugin hooks are third-party code: in the sandbox, with their data folder
+    // writable. The user's own hooks run as before.
+    let argv = match sandbox.filter(|_| hook.plugin) {
+        Some(sandbox) => {
+            let mut sandbox = sandbox.clone();
+            sandbox.writable.extend(
+                hook.env
+                    .iter()
+                    .filter(|(k, _)| k == "CLAUDE_PLUGIN_DATA")
+                    .map(|(_, v)| PathBuf::from(v)),
+            );
+            let root = crate::context::project_root(cwd);
+            crate::policy::sandboxed(&hook.command, &sandbox, &root)
+                .ok_or_else(|| anyhow::anyhow!("the sandbox couldn't start"))?
+        }
+        None => crate::procs::shell_argv(&hook.command),
+    };
+    let mut child = tokio::process::Command::new(&argv[0])
+        .args(&argv[1..])
         .current_dir(cwd)
         .env("CRACK_PROJECT_DIR", cwd)
         .env("CLAUDE_PROJECT_DIR", cwd)
