@@ -201,6 +201,10 @@ async fn turn_loop(
         return Ok(());
     }
     added.extend(outcome.context);
+    // `@server:uri` resources and a `/server:prompt` the user typed.
+    if !ctx.mcp.is_empty() {
+        added.extend(ctx.mcp.expand_prompt(&prompt).await);
+    }
     if !added.is_empty() {
         let text = added.join("\n\n");
         if let Some(last) = history.last_mut() {

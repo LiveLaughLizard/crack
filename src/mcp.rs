@@ -609,6 +609,50 @@ impl McpHub {
         Ok(())
     }
 
+    /// What a prompt pulls in from MCP: the text of each `@server:uri` resource it
+    /// mentions, and a `/server:prompt args` at its start filled in. Each block is
+    /// extra context for the user's message; failures say what went wrong.
+    pub async fn expand_prompt(&self, text: &str) -> Vec<String> {
+        let mut blocks = Vec::new();
+        if let Some(rest) = text.trim_start().strip_prefix('/') {
+            let (command, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            if let Some(prompt) = self.prompts().into_iter().find(|p| p.command() == command) {
+                let arguments = prompt_arguments(&prompt, args);
+                blocks.push(
+                    match self
+                        .get_prompt(&prompt.server, &prompt.name, arguments)
+                        .await
+                    {
+                        Ok(body) => format!("The user ran the MCP prompt /{command}:\n\n{body}"),
+                        Err(error) => format!("The MCP prompt /{command} failed: {error:#}"),
+                    },
+                );
+            }
+        }
+        let resources = self.resources();
+        let mut seen = Vec::new();
+        for word in text.split_whitespace() {
+            let Some(reference) = word.strip_prefix('@') else {
+                continue;
+            };
+            let reference = reference.trim_end_matches([',', '.', ';', ')', '?', '!']);
+            let Some((server, uri)) = reference.split_once(':') else {
+                continue;
+            };
+            if seen.iter().any(|s| s == reference)
+                || !resources.iter().any(|r| r.server == server && r.uri == uri)
+            {
+                continue;
+            }
+            seen.push(reference.to_owned());
+            blocks.push(match self.read_resource(server, uri).await {
+                Ok(body) => format!("Contents of the MCP resource @{server}:{uri}:\n\n{body}"),
+                Err(error) => format!("Couldn't read the MCP resource @{server}:{uri}: {error:#}"),
+            });
+        }
+        blocks
+    }
+
     /// Forgets a server's OAuth tokens.
     pub fn sign_out(&self, name: &str) -> anyhow::Result<()> {
         let url = self
@@ -619,8 +663,32 @@ impl McpHub {
             .find(|s| s.name == name)
             .and_then(|s| s.config.url.clone())
             .ok_or_else(|| anyhow!("no HTTP MCP server named '{name}'"))?;
-        config::save_mcp_oauth(&url, None)
+        config::save_mcp_oauth(&credentials_file()?, &url, None)
     }
+}
+
+/// `key=value` words become named arguments; any other text fills the first
+/// argument not given by name.
+fn prompt_arguments(prompt: &McpPrompt, args: &str) -> BTreeMap<String, String> {
+    let mut named = BTreeMap::new();
+    let mut loose = Vec::new();
+    for word in args.split_whitespace() {
+        match word.split_once('=') {
+            Some((key, value)) if prompt.arguments.iter().any(|(name, _)| name == key) => {
+                named.insert(key.to_owned(), value.to_owned());
+            }
+            _ => loose.push(word),
+        }
+    }
+    if !loose.is_empty()
+        && let Some((name, _)) = prompt
+            .arguments
+            .iter()
+            .find(|(name, _)| !named.contains_key(name))
+    {
+        named.insert(name.clone(), loose.join(" "));
+    }
+    named
 }
 
 /// Waits for the browser to come back to the localhost callback; returns its URL.
@@ -665,6 +733,19 @@ async fn accept_callback(listener: &tokio::net::TcpListener, name: &str) -> anyh
     }
 }
 
+/// Tests point the credentials file somewhere private.
+#[cfg(test)]
+static TEST_CREDENTIALS: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+/// crack's credentials file, where OAuth tokens are kept.
+fn credentials_file() -> anyhow::Result<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_CREDENTIALS.lock().unwrap().clone() {
+        return Ok(path);
+    }
+    config::credentials_path().ok_or_else(|| anyhow!("no config directory"))
+}
+
 /// OAuth tokens in crack's credentials file (0600), per server URL.
 struct FileStore {
     url: String,
@@ -673,18 +754,24 @@ struct FileStore {
 #[async_trait::async_trait]
 impl CredentialStore for FileStore {
     async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
-        Ok(config::load_mcp_oauth(&self.url).and_then(|json| serde_json::from_str(&json).ok()))
+        let Ok(path) = credentials_file() else {
+            return Ok(None);
+        };
+        Ok(config::load_mcp_oauth(&path, &self.url)
+            .and_then(|json| serde_json::from_str(&json).ok()))
     }
 
     async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
         let json = serde_json::to_string(&credentials)
             .map_err(|e| AuthError::CredentialStoreError(e.to_string()))?;
-        config::save_mcp_oauth(&self.url, Some(&json))
+        credentials_file()
+            .and_then(|path| config::save_mcp_oauth(&path, &self.url, Some(&json)))
             .map_err(|e| AuthError::CredentialStoreError(format!("{e:#}")))
     }
 
     async fn clear(&self) -> Result<(), AuthError> {
-        config::save_mcp_oauth(&self.url, None)
+        credentials_file()
+            .and_then(|path| config::save_mcp_oauth(&path, &self.url, None))
             .map_err(|e| AuthError::CredentialStoreError(format!("{e:#}")))
     }
 }
@@ -836,7 +923,7 @@ async fn start_http(
 
 /// The authorization saved for a server by an earlier sign-in, if any.
 async fn stored_authorization(url: &str) -> Option<AuthorizationManager> {
-    config::load_mcp_oauth(url)?;
+    config::load_mcp_oauth(&credentials_file().ok()?, url)?;
     let mut manager = AuthorizationManager::new(url).await.ok()?;
     manager.set_credential_store(FileStore {
         url: url.to_owned(),

@@ -144,6 +144,7 @@ const READ_ONLY: &[&str] = &[
     "git_diff",
     "git_log",
     "git_show",
+    "read_mcp_resource",
 ];
 
 pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
@@ -293,6 +294,34 @@ pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
     }
     // Air-gapped builds have no tool that reaches the internet.
     all.retain(|tool| cfg!(feature = "cloud") || tool.name != "webfetch");
+    // Reading an MCP server's resources is read-only, so every agent gets it.
+    let resources = ctx.mcp.resources();
+    if !resources.is_empty() {
+        let mut listing = String::from(
+            "Read a resource from an MCP server (a document, file, record…) by its server and URI. Available:\n",
+        );
+        for resource in resources.iter().take(40) {
+            listing.push_str(&format!(
+                "- {} {}: {}\n",
+                resource.server, resource.uri, resource.name
+            ));
+        }
+        if resources.len() > 40 {
+            listing.push_str(&format!("…and {} more.\n", resources.len() - 40));
+        }
+        all.push(spec(
+            "read_mcp_resource",
+            listing.trim_end(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "The MCP server's name."},
+                    "uri": {"type": "string", "description": "The resource's URI."}
+                },
+                "required": ["server", "uri"]
+            }),
+        ));
+    }
     // MCP tools can change things, so only Build gets them.
     if agent == Agent::Build {
         for tool in ctx.mcp.tools() {
@@ -362,6 +391,7 @@ pub fn title(name: &str, input: &Value) -> String {
             input.get("path").and_then(Value::as_str).unwrap_or(".")
         ),
         "webfetch" => format!("WebFetch {}", arg("url")),
+        "read_mcp_resource" => format!("Read {}:{}", arg("server"), arg("uri")),
         "todowrite" => "Todos".into(),
         "skill" => format!("Skill \"{}\"", arg("name")),
         other => match other
@@ -414,6 +444,7 @@ pub async fn run(name: &str, input: &Value, ctx: &ToolContext, agent: Agent) -> 
         "glob" => glob(input, ctx).await,
         "grep" => grep(input, ctx).await,
         "list" => list(input, ctx).await,
+        "read_mcp_resource" => read_mcp_resource(input, ctx, &title).await,
         #[cfg(feature = "cloud")]
         "webfetch" => webfetch(input, ctx).await,
         git if git.starts_with("git_") => crate::git::tool(git, input, ctx).await,
@@ -1055,6 +1086,27 @@ fn nested_instructions(file: &Path, ctx: &ToolContext) -> String {
         loaded.insert(path);
     }
     out
+}
+
+async fn read_mcp_resource(
+    input: &Value,
+    ctx: &ToolContext,
+    title: &str,
+) -> anyhow::Result<ToolOutput> {
+    let server = str_arg(input, "server").ok_or_else(|| anyhow::anyhow!("missing server"))?;
+    let uri = str_arg(input, "uri").ok_or_else(|| anyhow::anyhow!("missing uri"))?;
+    let text = ctx.mcp.read_resource(server, uri).await?;
+    Ok(ToolOutput::ok(
+        if text.is_empty() {
+            "(empty resource)".to_owned()
+        } else {
+            truncate_middle(&text, MAX_OUTPUT)
+        },
+        ToolMeta {
+            title: title.to_owned(),
+            ..Default::default()
+        },
+    ))
 }
 
 async fn run_mcp(

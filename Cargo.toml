@@ -110,3 +110,8 @@ force-sandbox = []
 # The built-in sandbox: Landlock (file access) and namespaces (network).
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
+
+[dev-dependencies]
+# The MCP tests' OAuth server parses forms and checks PKCE challenges.
+url = "2"
+base64 = "0.22"

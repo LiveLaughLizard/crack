@@ -394,16 +394,15 @@ pub fn forget_provider(id: &str) -> anyhow::Result<()> {
 
 /// OAuth credentials for an MCP server (by URL), as rmcp's JSON, from the
 /// credentials file's `[mcp_oauth]` table.
-pub fn load_mcp_oauth(url: &str) -> Option<String> {
-    let text = std::fs::read_to_string(credentials_path()?).ok()?;
+pub fn load_mcp_oauth(path: &Path, url: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
     let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
     doc.get("mcp_oauth")?.get(url)?.as_str().map(str::to_owned)
 }
 
 /// Saves (or with `None`, forgets) an MCP server's OAuth credentials.
-pub fn save_mcp_oauth(url: &str, json: Option<&str>) -> anyhow::Result<()> {
-    let path = credentials_path().ok_or_else(|| anyhow::anyhow!("no config directory"))?;
-    let mut doc = read_doc(&path)?;
+pub fn save_mcp_oauth(path: &Path, url: &str, json: Option<&str>) -> anyhow::Result<()> {
+    let mut doc = read_doc(path)?;
     if !doc.contains_key("mcp_oauth") {
         doc["mcp_oauth"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
@@ -418,7 +417,7 @@ pub fn save_mcp_oauth(url: &str, json: Option<&str>) -> anyhow::Result<()> {
             table.remove(url);
         }
     }
-    write_private(&path, &doc.to_string())
+    write_private(path, &doc.to_string())
 }
 
 /// Adds a permission rule to the project's config (`.crack/config.toml`, or an
