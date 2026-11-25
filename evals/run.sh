@@ -94,6 +94,12 @@ for i in $(seq 0 $((count - 1))); do
 
     dir="$work/$name"
     cp -r "$root/evals/fixtures/$fixture" "$dir"
+    # Per-task settings (e.g. a small context window), with MODEL standing for the model.
+    config=$(jq -r '.config // empty' <<<"$task")
+    if [ -n "$config" ]; then
+        mkdir -p "$dir/.crack"
+        printf '%s\n' "${config//MODEL/$model}" >"$dir/.crack/config.toml"
+    fi
     (cd "$dir" && git init -q && git add -A && git -c user.name=eval -c user.email=eval@localhost commit -qm fixture)
 
     start=$(date +%s.%N)
@@ -111,6 +117,8 @@ for i in $(seq 0 $((count - 1))); do
 
     usage=$(jq -c 'select(.type=="done") | .usage' "$out" 2>/dev/null | tail -1)
     [ -z "$usage" ] && usage='{}'
+    trims=$(grep -c '"type":"trimmed"' "$out")
+    compactions=$(grep -c '"type":"compacted"' "$out")
     cost=$(jq -n --argjson u "$usage" --arg p "$prices" '
         if $p == "" then null else
             ($p | split(",") | map(select(. != "") | tonumber)) as $r
@@ -122,12 +130,15 @@ for i in $(seq 0 $((count - 1))); do
 
     line=$(jq -nc --arg task "$name" --arg model "$model" --argjson pass "$pass" --argjson seconds "$seconds" \
         --argjson usage "$usage" --argjson cost "$cost" --argjson exit "$run_status" \
+        --argjson trims "$trims" --argjson compactions "$compactions" \
         '{date: (now | todate), task: $task, model: $model, pass: $pass, seconds: $seconds,
           input_tokens: ($usage.input_tokens // 0), output_tokens: ($usage.output_tokens // 0),
-          cache_read_tokens: ($usage.cache_read_tokens // 0), cost: $cost, crack_exit: $exit}')
+          cache_read_tokens: ($usage.cache_read_tokens // 0), cost: $cost, crack_exit: $exit,
+          trims: $trims, compactions: $compactions}')
     echo "$line" >>"$results"
     ran+=("$line")
-    printf '%-22s %s  %6ss\n' "$name" "$([ "$pass" = true ] && echo PASS || echo FAIL)" "$seconds"
+    printf '%-22s %s  %6ss  %s\n' "$name" "$([ "$pass" = true ] && echo PASS || echo FAIL)" "$seconds" \
+        "$(jq -r '"\(.input_tokens + .cache_read_tokens) in (\(.cache_read_tokens) cached), \(.trims) trims, \(.compactions) compactions"' <<<"$line")"
     if [ "$pass" = false ]; then
         echo "  check output (last lines):"; tail -5 "$work/$name.check" | sed 's/^/    /'
         [ -s "$work/$name.err" ] && { echo "  crack stderr:"; tail -3 "$work/$name.err" | sed 's/^/    /'; }
