@@ -132,6 +132,10 @@ yolo = []
 # without bwrap shell commands are refused.
 force-sandbox = []
 
+# Windows needs GPUI's application manifest (default features are off above).
+[target.'cfg(windows)'.dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
+
 # The built-in sandbox: Landlock (file access) and namespaces (network).
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"

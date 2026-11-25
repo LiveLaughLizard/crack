@@ -73,11 +73,25 @@ jobs:
           git config --global user.name "CI"
           git config --global user.email "ci@example.invalid"
 
+      # Errors become annotations, so they can be read without the full log.
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --all-targets --message-format=short -- -D warnings 2>&1 | tee clippy.txt
+          status=${PIPESTATUS[0]}
+          grep -E '^[^ ]+\.rs:[0-9]+:[0-9]+: (error|warning)' clippy.txt | head -40 |
+            sed -E 's/^([^:]+):([0-9]+):([0-9]+): (.*)$/::error file=\1,line=\2,col=\3::\4/'
+          exit $status
 
       - name: Test
-        run: cargo test
+        shell: bash
+        run: |
+          set +e
+          cargo test 2>&1 | tee test.txt
+          status=${PIPESTATUS[0]}
+          grep -E "panicked at|^test .* FAILED|^error" test.txt | head -40 | sed -E 's/^/::error::/'
+          exit $status
 
       - name: Headless smoke test against the mock
         shell: bash
