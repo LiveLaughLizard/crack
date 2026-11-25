@@ -25,6 +25,7 @@ mod memory;
 mod noise;
 mod plugins;
 mod policy;
+mod procs;
 mod providers;
 mod recovery;
 mod review;

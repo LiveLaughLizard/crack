@@ -78,6 +78,7 @@ pub fn untrack_group(pgid: u32) {
 }
 
 /// Stops process groups left by a crack that no longer runs. Returns how many.
+#[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
 pub fn reap_orphans() -> usize {
     let mut reaped = 0;
     #[cfg(target_os = "linux")]

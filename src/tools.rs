@@ -662,11 +662,8 @@ impl KillGroup {
 
 impl Drop for KillGroup {
     fn drop(&mut self) {
-        #[cfg(unix)]
         if let Some(pid) = self.0 {
-            unsafe {
-                libc::killpg(pid as i32, libc::SIGKILL);
-            }
+            crate::procs::stop_tree(pid, false);
         }
         if let Some(pid) = self.1 {
             crate::recovery::untrack_group(pid);
@@ -706,7 +703,7 @@ async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         Some(sandbox) if sandbox.forced => {
             anyhow::bail!("this build requires the sandbox, and bubblewrap (bwrap) isn't installed")
         }
-        _ => vec!["bash".into(), "-c".into(), command.to_owned()],
+        _ => crate::procs::shell_argv(command),
     };
     if input.get("run_in_background").and_then(Value::as_bool) == Some(true) {
         let id = crate::background::start(&argv, command, &workdir, &ctx.session_id, shell_path())?;
@@ -720,8 +717,8 @@ async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
             },
         ));
     }
-    let mut child = tokio::process::Command::new(&argv[0])
-        .args(&argv[1..])
+    let mut cmd = tokio::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..])
         .current_dir(&workdir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -730,10 +727,10 @@ async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         .env("PATH", shell_path())
         .env("GIT_PAGER", "cat")
         .env("PAGER", "cat")
-        .kill_on_drop(true)
-        // Its own process group, so an interrupted command's children stop too.
-        .process_group(0)
-        .spawn()?;
+        .kill_on_drop(true);
+    // Its own process group, so an interrupted command's children stop too.
+    crate::procs::own_group(&mut cmd);
+    let mut child = cmd.spawn()?;
     let mut group = KillGroup::new(child.id());
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");

@@ -94,11 +94,16 @@ pub fn run_helper(args: &[String]) -> ! {
     if let Err(error) = restrict_files(&writable, &hidden) {
         fail(&format!("couldn't restrict file access: {error}"));
     }
-    use std::os::unix::process::CommandExt;
-    let error = std::process::Command::new(&program[0])
-        .args(&program[1..])
-        .exec();
-    fail(&format!("couldn't run {}: {error}", program[0]));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = std::process::Command::new(&program[0])
+            .args(&program[1..])
+            .exec();
+        fail(&format!("couldn't run {}: {error}", program[0]));
+    }
+    #[cfg(not(unix))]
+    fail("the sandbox only runs on Linux");
 }
 
 fn fail(message: &str) -> ! {
@@ -157,6 +162,7 @@ fn restrict_files(_: &[PathBuf], _: &[PathBuf]) -> anyhow::Result<()> {
 
 /// Grants read on everything under `dir` except `hidden` paths: children with a
 /// hidden path inside are only listable, and are walked into.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn grant_reads(
     dir: &Path,
     hidden: &[PathBuf],

@@ -50,3 +50,31 @@ jobs:
 
       - name: Format, lint and test every build type
         run: just check
+
+  # macOS and Windows: build, lint and test (crack's main platform is Linux; these
+  # catch breakage until they're tested on real machines).
+  other-platforms:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Configure git
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.invalid"
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test

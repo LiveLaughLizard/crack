@@ -58,8 +58,8 @@ pub fn start(
     let log = dir.join(format!("{}-{id}.log", std::process::id()));
     let file = std::fs::File::create(&log)?;
     let err = file.try_clone()?;
-    let mut child = tokio::process::Command::new(&argv[0])
-        .args(&argv[1..])
+    let mut cmd = tokio::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..])
         .current_dir(workdir)
         .stdin(std::process::Stdio::null())
         .stdout(file)
@@ -67,9 +67,9 @@ pub fn start(
         .env("CRACK", "1")
         .env("PATH", path_env)
         .env("GIT_PAGER", "cat")
-        .env("PAGER", "cat")
-        .process_group(0)
-        .spawn()?;
+        .env("PAGER", "cat");
+    crate::procs::own_group(&mut cmd);
+    let mut child = cmd.spawn()?;
     let pgid = child.id();
     if let Some(pgid) = pgid {
         crate::recovery::track_group(pgid);
@@ -151,15 +151,6 @@ pub fn output(id: &str, session: &str, filter: Option<&str>) -> anyhow::Result<S
     Ok(format!("{body}\n\n[{id}: {}]", describe(&status)))
 }
 
-fn signal_group(pgid: u32, signal: i32) {
-    #[cfg(unix)]
-    unsafe {
-        libc::killpg(pgid as i32, signal);
-    }
-    #[cfg(not(unix))]
-    let _ = (pgid, signal);
-}
-
 /// Stops a background shell: SIGTERM, then SIGKILL a moment later.
 pub fn kill(id: &str, session: &str) -> anyhow::Result<String> {
     let pgid = {
@@ -176,10 +167,10 @@ pub fn kill(id: &str, session: &str) -> anyhow::Result<String> {
         shell.pgid
     };
     if let Some(pgid) = pgid {
-        signal_group(pgid, libc::SIGTERM);
+        crate::procs::stop_tree(pgid, true);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(2));
-            signal_group(pgid, libc::SIGKILL);
+            crate::procs::stop_tree(pgid, false);
         });
     }
     Ok(format!("Stopped {id}."))
@@ -204,7 +195,7 @@ pub fn kill_all() {
         if shell.status == Status::Running {
             shell.status = Status::Killed;
             if let Some(pgid) = shell.pgid {
-                signal_group(pgid, libc::SIGKILL);
+                crate::procs::stop_tree(pgid, false);
                 crate::recovery::untrack_group(pgid);
             }
         }
