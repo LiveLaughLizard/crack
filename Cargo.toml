@@ -136,6 +136,11 @@ force-sandbox = []
 [target.'cfg(windows)'.dependencies]
 gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 
+# macOS: compile GPUI's Metal shaders at startup instead of at build time (newer Xcode
+# ships the Metal compiler as a separate download).
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["runtime_shaders"] }
+
 # The built-in sandbox: Landlock (file access) and namespaces (network).
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
