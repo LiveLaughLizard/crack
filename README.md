@@ -193,6 +193,16 @@ tab to switch to it. Close it with its ×, a middle-click or `ctrl-x w`; closing
 running tab stops its turn. Opening a session that's already in a tab switches to that
 tab.
 
+## Built-in ripgrep
+
+The `grep` tool uses ripgrep's own search engine, so searches respect `.gitignore`,
+skip binary files, and are fast on large repos. Shell commands get `rg` even on
+machines without ripgrep: crack provides a ripgrep-compatible `rg` covering the common
+flags (`-i -w -F -l -c -o -g -t -A/-B/-C --hidden --files`, …), with the same output and
+exit codes. If ripgrep is installed, that one is used. `crack rg …` runs it directly.
+Plain `grep` is left alone, because scripts and build files rely on its exact behavior;
+the model is told to prefer `rg` instead.
+
 ## Permissions and the sandbox
 
 Every tool call is checked before it runs. The runtime decides, not the model.

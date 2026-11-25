@@ -10,6 +10,7 @@ mod headless;
 mod mcp;
 mod policy;
 mod providers;
+mod rg;
 mod runtime;
 mod sandbox;
 mod session;
@@ -22,7 +23,7 @@ mod workspace;
 
 use flag_rs::{CommandBuilder, CompletionResult, Context, Flag, Shell};
 use providers::Effort;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tools::Agent;
 use workspace::{Selection, Workspace};
@@ -362,6 +363,18 @@ fn main() {
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+    // Run as the built-in ripgrep when called as `rg` (the link shell commands see)
+    // or as `crack rg ...`.
+    let invoked_as = raw
+        .first()
+        .and_then(|a| Path::new(a).file_name())
+        .and_then(|n| n.to_str());
+    if invoked_as == Some("rg") {
+        std::process::exit(rg::main(&raw[1..]));
+    }
+    if raw.get(1).map(String::as_str) == Some("rg") {
+        std::process::exit(rg::main(&raw[2..]));
     }
     let mode = Arc::new(Mutex::new(None));
     let cli = build_cli(mode.clone());

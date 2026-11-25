@@ -892,7 +892,7 @@ fn bwrap_installed() -> bool {
     *FOUND.get_or_init(|| which("bwrap").is_some())
 }
 
-fn which(program: &str) -> Option<PathBuf> {
+pub fn which(program: &str) -> Option<PathBuf> {
     std::env::var_os("PATH")?
         .to_str()?
         .split(':')

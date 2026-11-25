@@ -425,6 +425,19 @@ fn floor_char(text: &str, mut index: usize) -> usize {
     index
 }
 
+/// PATH for shell commands: the user's, plus the built-in `rg` when ripgrep isn't installed.
+fn shell_path() -> std::ffi::OsString {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    match crate::rg::shim_dir() {
+        Some(dir) => {
+            let mut dirs = vec![dir];
+            dirs.extend(std::env::split_paths(&path));
+            std::env::join_paths(dirs).unwrap_or(path)
+        }
+        None => path,
+    }
+}
+
 async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
     let command = str_arg(input, "command").ok_or_else(|| anyhow::anyhow!("missing command"))?;
     let workdir = str_arg(input, "workdir")
@@ -453,6 +466,7 @@ async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .env("CRACK", "1")
+        .env("PATH", shell_path())
         .env("GIT_PAGER", "cat")
         .env("PAGER", "cat")
         .kill_on_drop(true)
@@ -754,9 +768,15 @@ async fn grep(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
     let title_pattern = pattern.clone();
     let (lines, count) =
         tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<String>, usize)> {
-            let regex = regex::RegexBuilder::new(&pattern)
+            use grep::searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
+            let matcher = grep::regex::RegexMatcherBuilder::new()
                 .case_insensitive(insensitive)
-                .build()?;
+                .line_terminator(Some(b'\n'))
+                .build(&pattern)?;
+            let mut searcher = SearcherBuilder::new()
+                .line_number(true)
+                .binary_detection(BinaryDetection::quit(0))
+                .build();
             let include = include
                 .map(|g| globset::Glob::new(&g).map(|g| g.compile_matcher()))
                 .transpose()?;
@@ -772,27 +792,21 @@ async fn grep(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
                 {
                     continue;
                 }
-                let Ok(bytes) = std::fs::read(entry.path()) else {
-                    continue;
-                };
-                if bytes.iter().take(8_192).any(|b| *b == 0) {
-                    continue;
-                }
-                let text = String::from_utf8_lossy(&bytes);
-                for (number, line) in text.lines().enumerate() {
-                    if regex.is_match(line) {
+                let shown = display_path(&cwd, entry.path());
+                // Unreadable files are skipped, like ripgrep does with a warning.
+                let _ = searcher.search_path(
+                    &matcher,
+                    entry.path(),
+                    Lossy(|number, line| {
                         count += 1;
                         if lines.len() < 250 {
                             let line = line.trim();
                             let line = &line[..floor_char(line, 300)];
-                            lines.push(format!(
-                                "{}:{}: {line}",
-                                display_path(&cwd, entry.path()),
-                                number + 1
-                            ));
+                            lines.push(format!("{shown}:{number}: {line}"));
                         }
-                    }
-                }
+                        Ok(true)
+                    }),
+                );
             }
             Ok((lines, count))
         })

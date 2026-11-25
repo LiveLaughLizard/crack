@@ -58,6 +58,9 @@ bytes = "1"
 
 # Tools: .gitignore-aware walking, globbing, regex search, diffs.
 ignore = "0.4"
+# ripgrep's search engine, for the grep tool and the built-in `rg`.
+grep = "0.4"
+termcolor = "1"
 globset = "0.4"
 regex = "1"
 similar = "2"

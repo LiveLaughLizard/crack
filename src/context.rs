@@ -21,6 +21,8 @@ code, running builds and tests.
 # How to work
 - Use the tools to look before you act. Read files before editing them; search with grep \
 and glob rather than guessing paths.
+- In shell commands, search with `rg` (ripgrep, always available here) instead of `grep -r` \
+or `find | xargs grep`: it skips .gitignore'd files and is much faster.
 - Prefer `edit` for changes to existing files and `write` for new files. Keep changes \
 focused on what was asked, and match the surrounding code style.
 - Run the project's build, tests or linters with `bash` when they exist, and fix what \
