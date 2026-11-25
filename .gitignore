@@ -1,3 +1,6 @@
 target/
 result
 .claude/worktrees/
+evals/results/*
+!evals/results/README.md
+evals/.cache/
