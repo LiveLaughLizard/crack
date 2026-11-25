@@ -14,6 +14,7 @@ use gpui::{
     IntoElement, MouseButton, ParentElement, Render, ScrollWheelEvent, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
+use gpui::{ListOffset, list};
 use std::time::Duration;
 
 /// Three pulsing dots, drawn rather than typed so they show in any font.
@@ -967,41 +968,53 @@ impl CrackView {
     }
 
     fn render_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.follow {
-            self.scroll.scroll_to_bottom();
+        // Keep the list in step with the session: a different session (or a shorter one,
+        // after a rewind) starts over; new entries are added at the end.
+        let count = self.session.entries.len();
+        let (for_session, had) = &self.transcript_for;
+        if *for_session != self.session.id || count < *had {
+            self.scroll.reset(count);
+        } else if count > *had {
+            self.scroll.splice(*had..*had, count - had);
         }
-        let entries: Vec<AnyElement> = self
-            .session
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(i, entry)| self.render_entry(i, entry, cx))
-            .collect();
+        self.transcript_for = (self.session.id.clone(), count);
+        if self.follow && count > 0 {
+            // Past the end: the list settles with the last entry at the bottom.
+            self.scroll.scroll_to(ListOffset {
+                item_ix: count,
+                offset_in_item: px(0.),
+            });
+        }
+        let view = cx.entity();
         let transcript = div()
             .id("transcript")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 let delta = event.delta.pixel_delta(px(20.));
                 if delta.y > px(0.) {
                     this.follow = false;
                 } else {
-                    let max = this.scroll.max_offset().height;
-                    this.follow = -this.scroll.offset().y >= max - px(30.);
+                    this.follow = this.transcript_at_end();
                 }
                 cx.notify();
             }))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(14.))
-                    .px(px(24.))
-                    .pt(px(20.))
-                    .pb(px(12.))
-                    .children(entries),
+                list(self.scroll.clone(), move |ix, _window, cx| {
+                    view.update(cx, |this, cx| {
+                        let Some(entry) = this.session.entries.get(ix).cloned() else {
+                            return div().into_any_element();
+                        };
+                        let last = ix + 1 == this.session.entries.len();
+                        div()
+                            .px(px(24.))
+                            .pt(px(if ix == 0 { 20. } else { 14. }))
+                            .when(last, |d| d.pb(px(12.)))
+                            .child(this.render_entry(ix, &entry, cx))
+                            .into_any_element()
+                    })
+                })
+                .size_full(),
             );
         let jump = div()
             .h(px(20.))

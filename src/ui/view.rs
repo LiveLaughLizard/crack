@@ -14,6 +14,7 @@ use crate::workspace::{Selection, Workspace};
 use gpui::{
     AppContext as _, ClipboardItem, Context, Entity, Focusable, ScrollHandle, Subscription, Window,
 };
+use gpui::{ListAlignment, ListState};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -170,7 +171,10 @@ pub struct CrackView {
     pub(super) selection: Selection,
     pub(super) session: Session,
     pub(super) input: Entity<TextInput>,
-    pub(super) scroll: ScrollHandle,
+    /// The transcript, virtualized: only entries on screen are laid out.
+    pub(super) scroll: ListState,
+    /// The session the transcript list was built for, and how many entries it had.
+    pub(super) transcript_for: (String, usize),
     pub(super) follow: bool,
     pub(super) running: Option<Running>,
     pub(super) esc_armed: Option<Instant>,
@@ -282,7 +286,8 @@ impl CrackView {
             selection,
             session,
             input,
-            scroll: ScrollHandle::new(),
+            transcript_for: (String::new(), 0),
+            scroll: new_transcript(),
             follow: true,
             running: None,
             esc_armed: None,
@@ -1194,13 +1199,24 @@ impl CrackView {
     }
 
     pub(super) fn scroll_by(&mut self, pages: f32, cx: &mut Context<Self>) {
-        let height = self.scroll.bounds().size.height;
-        let mut offset = self.scroll.offset();
-        let max = self.scroll.max_offset().height;
-        offset.y = (offset.y - height * pages * 0.9).clamp(-max, px(0.));
-        self.scroll.set_offset(offset);
-        self.follow = -offset.y >= max - px(4.);
+        let height = self.scroll.viewport_bounds().size.height;
+        // `pages` counts upward (page up is 1); the list scrolls down for positive distances.
+        self.scroll.scroll_by(-height * pages * 0.9);
+        self.follow = pages < 0. && self.transcript_at_end();
         cx.notify();
+    }
+
+    /// The last entry's bottom is on screen (as of the last frame).
+    pub(super) fn transcript_at_end(&self) -> bool {
+        let count = self.scroll.item_count();
+        if count == 0 {
+            return true;
+        }
+        let viewport = self.scroll.viewport_bounds();
+        match self.scroll.bounds_for_item(count - 1) {
+            Some(item) => item.bottom() <= viewport.bottom() + px(4.),
+            None => false,
+        }
     }
 
     // ---- Dialogs ----
@@ -1851,7 +1867,7 @@ pub(super) struct TabState {
     pub expanded: HashSet<String>,
     pub session_rules: Arc<Mutex<Vec<String>>>,
     pub follow: bool,
-    pub scroll: ScrollHandle,
+    pub scroll: ListState,
     pub esc_armed: Option<Instant>,
     /// What was typed in the prompt but not sent.
     pub draft: String,
@@ -1868,7 +1884,7 @@ impl CrackView {
             session_rules: std::mem::take(&mut self.session_rules),
             expanded: std::mem::take(&mut self.expanded),
             follow: std::mem::replace(&mut self.follow, true),
-            scroll: std::mem::replace(&mut self.scroll, ScrollHandle::new()),
+            scroll: std::mem::replace(&mut self.scroll, new_transcript()),
             esc_armed: self.esc_armed.take(),
             draft,
         }
@@ -1899,7 +1915,7 @@ impl CrackView {
             session_rules: Arc::default(),
             expanded: HashSet::new(),
             follow: true,
-            scroll: ScrollHandle::new(),
+            scroll: new_transcript(),
             esc_armed: None,
             draft: String::new(),
         }
@@ -2550,4 +2566,9 @@ impl CrackView {
             Err(error) => self.show_toast(format!("Couldn't export: {error:#}"), true, cx),
         }
     }
+}
+
+/// A fresh transcript list (entries are added as the session grows).
+pub(super) fn new_transcript() -> ListState {
+    ListState::new(0, ListAlignment::Top, px(1200.))
 }
