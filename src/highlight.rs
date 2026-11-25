@@ -245,7 +245,17 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            ["c", "cpp", "go", "java", "javascript", "python", "rust", "tsx", "typescript"]
+            [
+                "c",
+                "cpp",
+                "go",
+                "java",
+                "javascript",
+                "python",
+                "rust",
+                "tsx",
+                "typescript"
+            ]
         );
         for (fence, code) in [
             ("py", "def f():\n    return \"x\""),
