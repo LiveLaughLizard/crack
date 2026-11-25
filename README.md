@@ -303,6 +303,12 @@ the exact command and runs it only after you confirm. Set `lsp = false` to turn 
 servers off, or `lsp_wait_ms` to change how long crack waits for diagnostics after an edit
 (3000 by default). Each server's log is `lsp-<name>.log` in the data folder.
 
+## Mentions
+
+Type `@` in the prompt for fuzzy suggestions of the project's files. An `@path` attaches
+that file, or a folder's listing, to your message, up to 2,000 lines. Secrets like `.env`
+are never attached. MCP resources work the same way, as `@server:uri`.
+
 ## Subagents
 
 The model can hand a self-contained job to a subagent with the `task` tool. A subagent

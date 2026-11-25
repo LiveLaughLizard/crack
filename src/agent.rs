@@ -234,6 +234,8 @@ pub(crate) async fn turn_loop(
     if !ctx.mcp.is_empty() {
         added.extend(ctx.mcp.expand_prompt(&prompt).await);
     }
+    // `@path` mentions attach files.
+    added.extend(tools::expand_file_mentions(&prompt, &ctx.cwd));
     // What earlier sessions saved that bears on this request.
     if ctx.memory {
         let project = crate::memory::project_key(&ctx.cwd);

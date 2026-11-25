@@ -396,6 +396,10 @@ pub fn looks_secret(text: &str) -> bool {
     })
 }
 
+pub fn is_secret_path(path: &Path) -> bool {
+    is_secret(path)
+}
+
 fn is_secret(path: &Path) -> bool {
     let text = path.display().to_string();
     let name = path

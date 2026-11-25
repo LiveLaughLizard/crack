@@ -183,6 +183,8 @@ pub struct CrackView {
     pub(super) memory_target: Option<i64>,
     /// Sessions whose last turn crack didn't finish: (id, title).
     pub(super) interrupted: Vec<(String, String)>,
+    /// Project files for `@` suggestions, and when they were listed.
+    file_cache: Option<(Instant, std::sync::Arc<Vec<String>>)>,
     recent_models: Vec<String>,
     pub(super) discovering: bool,
     /// The window title last set; updated when the session or directory changes.
@@ -275,6 +277,7 @@ impl CrackView {
             pending_install: None,
             memory_target: None,
             interrupted: Vec::new(),
+            file_cache: None,
             recent_models,
             discovering: false,
             window_title: String::new(),
@@ -647,6 +650,24 @@ impl CrackView {
                         skill: false,
                         label: format!("@{reference}"),
                         insert: format!("{before}@{reference} "),
+                    });
+                }
+            }
+            // `@path` attaches a file: fuzzy-match the project's files.
+            if !query.contains(':') {
+                let files = self.project_files();
+                let mut scored: Vec<(i32, &String)> = files
+                    .iter()
+                    .filter_map(|path| file_score(&query, path).map(|s| (s, path)))
+                    .collect();
+                scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())));
+                for (_, path) in scored.into_iter().take(8) {
+                    self.autocomplete.push(SlashItem {
+                        name: path.clone(),
+                        description: "file".into(),
+                        skill: false,
+                        label: format!("@{path}"),
+                        insert: format!("{before}@{path} "),
                     });
                 }
             }
@@ -2307,5 +2328,60 @@ impl CrackView {
             ""
         };
         self.show_toast(format!("{text}{note}"), false, cx);
+    }
+}
+
+/// How well `query` fuzzy-matches a file path (None: not at all). Matches in the file
+/// name count most, then runs of consecutive characters.
+fn file_score(query: &str, path: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let lower = path.to_lowercase();
+    let name_start = lower.rfind('/').map_or(0, |i| i + 1);
+    if let Some(i) = lower[name_start..].find(query) {
+        return Some(2000 - i as i32);
+    }
+    if let Some(i) = lower.find(query) {
+        return Some(1000 - i as i32);
+    }
+    let mut score = 0;
+    let mut last: Option<usize> = None;
+    let mut chars = lower.char_indices();
+    for q in query.chars() {
+        let (i, _) = chars.find(|(_, c)| *c == q)?;
+        score += match last {
+            Some(l) if i == l + 1 => 8,
+            _ => 1,
+        } + if i >= name_start { 2 } else { 0 };
+        last = Some(i);
+    }
+    Some(score)
+}
+
+impl CrackView {
+    /// The project's files (respecting .gitignore), cached for a few seconds.
+    fn project_files(&mut self) -> std::sync::Arc<Vec<String>> {
+        if let Some((at, files)) = &self.file_cache
+            && at.elapsed() < Duration::from_secs(10)
+        {
+            return files.clone();
+        }
+        let root = crate::context::project_root(&self.ws.cwd);
+        let files: Vec<String> = ignore::WalkBuilder::new(&root)
+            .build()
+            .flatten()
+            .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
+            .filter_map(|e| {
+                e.path()
+                    .strip_prefix(&root)
+                    .ok()
+                    .map(|p| p.display().to_string())
+            })
+            .take(50_000)
+            .collect();
+        let files = std::sync::Arc::new(files);
+        self.file_cache = Some((Instant::now(), files.clone()));
+        files
     }
 }

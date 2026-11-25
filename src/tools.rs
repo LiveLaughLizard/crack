@@ -1302,6 +1302,84 @@ fn memory_tool(name: &str, input: &Value, ctx: &ToolContext) -> anyhow::Result<T
     }
 }
 
+/// `@path` mentions in a prompt: each existing file in the project is attached (up to
+/// 2,000 lines), a folder as its listing. `@server:uri` (MCP) is left alone.
+pub fn expand_file_mentions(prompt: &str, cwd: &Path) -> Vec<String> {
+    let root = crate::context::project_root(cwd);
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for word in prompt.split_whitespace() {
+        let Some(mention) = word.strip_prefix('@') else {
+            continue;
+        };
+        let mention = mention.trim_end_matches(['.', ',', ';', ':', ')', '?', '!']);
+        if mention.is_empty() || mention.contains("://") || !seen.insert(mention.to_owned()) {
+            continue;
+        }
+        let path = [root.join(mention), cwd.join(mention)]
+            .into_iter()
+            .find(|p| p.exists());
+        let Some(path) = path else { continue };
+        if !path.starts_with(&root) || crate::policy::is_secret_path(&path) {
+            continue;
+        }
+        let shown = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        if path.is_dir() {
+            let mut names: Vec<String> = std::fs::read_dir(&path)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|e| {
+                            let name = e.file_name().to_string_lossy().into_owned();
+                            if e.path().is_dir() {
+                                format!("{name}/")
+                            } else {
+                                name
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            out.push(format!(
+                "<folder path=\"{shown}\">\n{}\n</folder>",
+                names.join("\n")
+            ));
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if bytes.iter().take(8_192).any(|b| *b == 0) {
+            out.push(format!(
+                "<file path=\"{shown}\">(binary file, {} bytes)</file>",
+                bytes.len()
+            ));
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let lines: Vec<&str> = text.lines().collect();
+        let mut body = lines
+            .iter()
+            .take(2_000)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n");
+        if lines.len() > 2_000 {
+            body.push_str(&format!(
+                "\n… ({} more lines; read the rest with the read tool)",
+                lines.len() - 2_000
+            ));
+        }
+        out.push(format!("<file path=\"{shown}\">\n{body}\n</file>"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
