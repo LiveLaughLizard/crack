@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=crack
+GenericName=Coding agent
+Comment=Coding agents, certified cracked.
+Exec=crack
+Icon=crack
+Terminal=false
+Categories=Development;IDE;
+Keywords=AI;agent;coding;LLM;
+StartupWMClass=crack

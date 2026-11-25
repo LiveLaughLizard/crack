@@ -40,6 +40,34 @@ there, like `claude` or `opencode` do in a terminal:
 - **Build types.** A full build, one without Chinese services, or an air-gapped build
   with every cloud provider compiled out.
 
+## Install
+
+**Release downloads.** Each [release](https://github.com/LiveLaughLizard/crack/releases)
+has a Linux archive for every build type (see [Build types](#build-types)) on x86_64 and
+aarch64:
+
+```
+crack-<version>-<build>-<arch>-linux.tar.gz
+```
+
+Each archive holds the `crack` binary, `LICENSE`, `README.md`, `THIRD-PARTY-NOTICES`, a
+desktop entry and the icon. `SHA256SUMS` lists the checksums. Unpack it and put `crack`
+on your PATH. To get a launcher entry, copy `share/` into `~/.local/share/`.
+
+The binary needs the usual desktop libraries: Wayland or X11 (`libxkbcommon`), Vulkan
+(`libvulkan1`), fontconfig and freetype.
+
+**Nix:**
+
+```sh
+nix run github:LiveLaughLizard/crack            # try it
+nix profile install github:LiveLaughLizard/crack
+nix build .#airgap                                # or .#no-china, .#strict
+```
+
+The package includes the desktop entry and icon. Its PATH also has git, ripgrep and
+bubblewrap.
+
 ## Build
 
 ```sh
@@ -50,6 +78,24 @@ cargo build --release
 
 The shell provides rustup (pinned by `rust-toolchain.toml`) and the libraries GPUI
 needs on Linux (Wayland, X11, Vulkan, fontconfig).
+
+Without Nix, install Rust with [rustup](https://rustup.rs), then the development
+libraries. On Debian or Ubuntu:
+
+```sh
+sudo apt install pkg-config cmake clang libfontconfig-dev libfreetype-dev \
+  libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libvulkan1
+```
+
+**More recipes:**
+- `just install`: build and copy the binary to `~/.local/bin`.
+- `just check`: what CI runs (format, lint every build type, tests).
+- `just notices`: write the third-party license notices (needs `cargo-about`).
+- `just archive <build>`: package a built binary the way releases are packaged.
+- `just package`: run `nix build`.
+
+Pushing a `v*` tag runs the release workflow, which builds everything and publishes the
+GitHub release.
 
 ## Providers
 
@@ -138,12 +184,13 @@ compiled out entirely: no code, endpoints or hostnames for them are in the binar
 | Build | Command | Contains |
 |---|---|---|
 | Full (default) | `cargo build --release` or `just build` | All providers |
-| No Chinese services | `cargo build --release --no-default-features --features cloud` or `just build-no-china` | Everything except Qwen, Kimi, Z.ai, MiniMax and DeepSeek |
-| Air-gapped | `cargo build --release --no-default-features` or `just build-airgap` | Only Ollama, LM Studio and self-hosted OpenAI- or Anthropic-compatible servers you configure; no `webfetch` tool |
+| No Chinese services | `cargo build --release --no-default-features --features cloud,yolo,languages` or `just build-no-china` | Everything except Qwen, Kimi, Z.ai, MiniMax and DeepSeek |
+| Air-gapped | `cargo build --release --no-default-features --features yolo,languages` or `just build-airgap` | Only Ollama, LM Studio and self-hosted OpenAI- or Anthropic-compatible servers you configure; no `webfetch` tool |
 | Strict | `just build-strict` | All providers, no YOLO mode, sandbox always on |
 
-The features are `cloud` (hosted providers and `webfetch`) and `china` (the Chinese
-model clouds; it requires `cloud`). `crack providers` and the home screen show which
+The features are `cloud` (hosted providers and `webfetch`), `china` (the Chinese
+model clouds; it requires `cloud`), `yolo` (YOLO mode), `force-sandbox` and `languages`
+(the tree-sitter grammars). `crack providers` and the home screen show which
 build is running. An air-gapped build still uses whatever `base_url` you configure, so
 point it only at servers inside your network.
 

@@ -1,3 +1,5 @@
 target/
 result
 .claude/worktrees/
+dist/
+THIRD-PARTY-NOTICES

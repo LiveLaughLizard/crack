@@ -1,0 +1,22 @@
+Third-party software in crack
+=============================
+
+crack is MIT licensed (see LICENSE). It is built from the open source crates below,
+grouped by license, with each license's full text.
+
+Overview:
+{{#each overview}}
+- {{{name}}}: {{count}} crate(s)
+{{/each}}
+{{#each licenses}}
+
+--------------------------------------------------------------------------------
+{{{name}}} ({{id}})
+
+Used by:
+{{#each used_by}}
+- {{{crate.name}}} {{crate.version}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

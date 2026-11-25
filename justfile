@@ -80,18 +80,46 @@ build:
 
 # Build without the Chinese model clouds (Qwen, Kimi, Z.ai, MiniMax, DeepSeek)
 build-no-china:
-    cargo build --release --no-default-features --features cloud --target-dir target/no-china
+    cargo build --release --no-default-features --features cloud,yolo,languages --target-dir target/no-china
     @echo "Binary: target/no-china/release/crack"
 
 # Build for air-gapped networks: local and self-hosted servers only, no cloud code
 build-airgap:
-    cargo build --release --no-default-features --target-dir target/airgap
+    cargo build --release --no-default-features --features yolo,languages --target-dir target/airgap
     @echo "Binary: target/airgap/release/crack"
 
 # Build for companies that keep a human in the loop: no YOLO mode, sandbox always on
 build-strict:
-    cargo build --release --no-default-features --features cloud,china,force-sandbox --target-dir target/strict
+    cargo build --release --no-default-features --features cloud,china,force-sandbox,languages --target-dir target/strict
     @echo "Binary: target/strict/release/crack"
+
+# Write THIRD-PARTY-NOTICES: every dependency's license (needs cargo-about)
+notices:
+    cargo about generate about.hbs -o THIRD-PARTY-NOTICES
+    @echo "Wrote THIRD-PARTY-NOTICES"
+
+# Package a built flavor for release: dist/crack-<version>-<flavor>-<arch>-linux.tar.gz
+archive flavor="default": notices
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{flavor}}" in
+        default) bin=target/release/crack ;;
+        no-china|airgap|strict) bin=target/{{flavor}}/release/crack ;;
+        *) echo "unknown flavor {{flavor}} (default, no-china, airgap, strict)" >&2; exit 1 ;;
+    esac
+    name="crack-{{version}}-{{flavor}}-$(uname -m)-linux"
+    rm -rf "dist/$name"
+    mkdir -p "dist/$name"
+    install -m755 "$bin" "dist/$name/crack"
+    cp LICENSE README.md THIRD-PARTY-NOTICES "dist/$name/"
+    install -Dm644 packaging/crack.desktop "dist/$name/share/applications/crack.desktop"
+    install -Dm644 assets/logo.png "dist/$name/share/pixmaps/crack.png"
+    tar -C dist -czf "dist/$name.tar.gz" "$name"
+    echo "dist/$name.tar.gz"
+
+# Build the Nix package (all providers); `just package airgap` for another flavor
+package flavor="default":
+    nix build .#{{flavor}}
 
 # Install the binary into $PREFIX/bin (default ~/.local/bin)
 install: build

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: just check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake clang git jq \
+            libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev libvulkan1
+
+      # rustup reads rust-toolchain.toml (stable, with rustfmt and clippy).
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      # Checkpoint tests make git snapshots; give git an identity just in case.
+      - name: Configure git
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.invalid"
+
+      - name: Format, lint and test every build type
+        run: just check
