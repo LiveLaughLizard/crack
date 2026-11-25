@@ -13,6 +13,7 @@ mod config;
 mod context;
 mod delegate;
 mod doctor;
+mod export;
 mod git;
 mod headless;
 mod highlight;
@@ -95,6 +96,10 @@ enum Mode {
         args: Vec<String>,
     },
     Plugin {
+        args: Vec<String>,
+    },
+    Export {
+        common: Common,
         args: Vec<String>,
     },
     Usage {
@@ -180,6 +185,7 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
     let hooks_mode = mode.clone();
     let extensions_mode = mode.clone();
     let plugin_mode = mode.clone();
+    let export_mode = mode.clone();
     let usage_mode = mode.clone();
     let doctor_mode = mode.clone();
     let completion_mode = mode.clone();
@@ -363,6 +369,19 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                     set(
                         &mcp_mode,
                         Mode::Mcp {
+                            common: common(ctx)?,
+                            args: ctx.args().to_vec(),
+                        },
+                    );
+                    Ok(())
+                })
+                .build(),
+            CommandBuilder::new("export")
+                .short("Export a session to share: `crack export [last|<id>] [html] [<file>]` (Markdown to stdout by default)")
+                .run(move |ctx| {
+                    set(
+                        &export_mode,
+                        Mode::Export {
                             common: common(ctx)?,
                             args: ctx.args().to_vec(),
                         },
@@ -756,6 +775,50 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
             Ok(0)
         }
         Mode::Plugin { args } => Ok(plugin_command(&args)),
+        Mode::Export { common, args } => {
+            let (workspace, _) = load_workspace(&common)?;
+            let mut id = "last".to_owned();
+            let mut html = false;
+            let mut file = None;
+            for arg in args {
+                match arg.as_str() {
+                    "html" | "--html" => html = true,
+                    "md" | "markdown" => html = false,
+                    a if a.contains('.') || a.contains('/') => file = Some(a.to_owned()),
+                    a => id = a.to_owned(),
+                }
+            }
+            let session = if id == "last" {
+                let root = crate::context::project_root(&workspace.cwd);
+                let summary = session::Session::list(&root)
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("no sessions in this project yet"))?;
+                session::Session::load(&summary.id)?
+            } else {
+                session::Session::load(&id)?
+            };
+            let (text, redacted) = if html {
+                export::html(&session)
+            } else {
+                export::markdown(&session)
+            };
+            match file {
+                Some(path) => {
+                    std::fs::write(&path, text)?;
+                    eprintln!(
+                        "Wrote {path}{}",
+                        if redacted > 0 {
+                            format!(" ({redacted} secret-looking item(s) redacted)")
+                        } else {
+                            String::new()
+                        }
+                    );
+                }
+                None => print!("{text}"),
+            }
+            Ok(0)
+        }
         Mode::Extensions { common, args } => {
             let (workspace, _) = load_workspace(&common)?;
             match (args.first().map(String::as_str), args.get(1)) {

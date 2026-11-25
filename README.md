@@ -299,6 +299,16 @@ warning and failure stays with a few lines of context, plus the summary at the e
 full output is saved and the note says where, so the model can read it if it needs to.
 Turn it off with `trim_output = false`.
 
+## Sharing a session
+
+`/export` copies the session as Markdown and saves it; `/export html` saves a
+self-contained page (crack's colors, highlighted code, images inlined, a light/dark
+switch) and opens it. From the command line: `crack export [last|<session id>] [html]
+[<file>]` (Markdown to stdout by default). Tool calls fold into collapsible sections and
+subagents' transcripts are nested. Text that looks like a secret (API keys, private
+keys, `password=` values, bearer tokens) is redacted, and output from reading secret
+files is left out.
+
 ## Undo, redo and rewinding
 
 Before a turn first changes anything, crack snapshots the project's files, and it

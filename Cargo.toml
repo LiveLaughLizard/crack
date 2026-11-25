@@ -94,7 +94,7 @@ hex = "0.4"
 async-trait = "0.1"
 
 # Markdown in assistant messages.
-pulldown-cmark = { version = "0.12", default-features = false }
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
 [profile.release]
 codegen-units = 1

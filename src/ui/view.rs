@@ -106,6 +106,11 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
         &["plugins", "marketplace", "install"],
     ),
     (
+        "export",
+        "Export this session to share: /export (Markdown, copied) or /export html",
+        &["share"],
+    ),
+    (
         "plugin",
         "Plugins: /plugin marketplace add <repo>, /plugin install <name>",
         &[],
@@ -862,6 +867,7 @@ impl CrackView {
             Some("memory") => self.open_picker(PickerKind::Memory, window, cx),
             Some("extensions") => self.open_picker(PickerKind::Extensions, window, cx),
             Some("plugin") => self.plugin_slash(args, window, cx),
+            Some("export") => self.export_session(args, cx),
             Some("settings") => self.open_picker(PickerKind::Settings, window, cx),
             Some("usage") => {
                 let project = crate::memory::project_key(&self.ws.cwd);
@@ -1569,7 +1575,7 @@ impl CrackView {
             "models" | "effort" | "agents" | "connect" => "Agent",
             "skills" | "init" | "reload" | "cd" | "compact" | "undo" | "redo" | "diff"
             | "trust-hooks" | "commit" | "memory" | "remember" | "export-memory" | "usage"
-            | "extensions" | "plugin" => "Project",
+            | "extensions" | "plugin" | "export" => "Session",
             "yolo" | "accept-edits" | "review" | "normal" | "sandbox" | "sandbox-network" => {
                 "Safety"
             }
@@ -2507,6 +2513,41 @@ impl CrackView {
         {
             *t = !*t;
             cx.notify();
+        }
+    }
+}
+
+impl CrackView {
+    /// `/export [html]`: saves the session to share. Markdown is also copied; HTML opens
+    /// in the browser.
+    fn export_session(&mut self, args: &str, cx: &mut Context<Self>) {
+        if self.session.entries.is_empty() {
+            self.show_toast("Nothing to export yet.", false, cx);
+            return;
+        }
+        let html = args.trim().eq_ignore_ascii_case("html");
+        match crate::export::save(&self.session, html) {
+            Ok((path, redacted)) => {
+                let note = if redacted > 0 {
+                    format!(" ({redacted} secret-looking item(s) redacted)")
+                } else {
+                    String::new()
+                };
+                if html {
+                    cx.open_url(&format!("file://{}", path.display()));
+                    self.show_toast(format!("Saved {}{note}", path.display()), false, cx);
+                } else {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                    self.show_toast(
+                        format!("Copied as Markdown and saved {}{note}", path.display()),
+                        false,
+                        cx,
+                    );
+                }
+            }
+            Err(error) => self.show_toast(format!("Couldn't export: {error:#}"), true, cx),
         }
     }
 }
