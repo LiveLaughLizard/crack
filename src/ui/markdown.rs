@@ -20,6 +20,7 @@ pub enum Block {
     },
     Code {
         text: String,
+        spans: Vec<(Range<usize>, crate::highlight::Kind)>,
     },
     Rule,
 }
@@ -56,6 +57,7 @@ pub fn parse(source: &str) -> Vec<Block> {
     let mut lists: Vec<Option<u64>> = Vec::new();
     let mut pending_prefix: Option<String> = None;
     let mut code: Option<String> = None;
+    let mut lang = String::new();
 
     let style = |bold: i32, italic: i32, strike: i32, link: i32| -> Option<HighlightStyle> {
         if bold == 0 && italic == 0 && strike == 0 && link == 0 {
@@ -103,10 +105,9 @@ pub fn parse(source: &str) -> Vec<Block> {
             match event {
                 Event::Text(text) => buffer.push_str(&text),
                 Event::End(TagEnd::CodeBlock) => {
-                    let text = code.take().unwrap();
-                    blocks.push(Block::Code {
-                        text: text.trim_end_matches('\n').to_owned(),
-                    });
+                    let text = code.take().unwrap().trim_end_matches('\n').to_owned();
+                    let spans = crate::highlight::highlight(&lang, &text);
+                    blocks.push(Block::Code { text, spans });
                 }
                 _ => {}
             }
@@ -124,7 +125,10 @@ pub fn parse(source: &str) -> Vec<Block> {
                 }
                 Tag::CodeBlock(kind) => {
                     flush!();
-                    let _ = matches!(kind, CodeBlockKind::Fenced(_));
+                    lang = match kind {
+                        CodeBlockKind::Fenced(info) => info.to_string(),
+                        CodeBlockKind::Indented => String::new(),
+                    };
                     code = Some(String::new());
                 }
                 Tag::List(start) => {
@@ -207,7 +211,8 @@ pub fn parse(source: &str) -> Vec<Block> {
     }
     if let Some(text) = code.take() {
         // An unterminated fence while streaming.
-        blocks.push(Block::Code { text });
+        let spans = crate::highlight::highlight(&lang, &text);
+        blocks.push(Block::Code { text, spans });
     }
     flush!();
     blocks
@@ -257,17 +262,41 @@ pub fn render(blocks: &[Block], color: Hsla) -> AnyElement {
                 }
                 row.child(body.child(styled)).into_any_element()
             }
-            Block::Code { text } => div()
+            Block::Code { text, spans } => div()
                 .bg(theme::raised())
                 .rounded(px(4.))
                 .px(px(12.))
                 .py(px(8.))
                 .text_color(theme::md_text())
                 .overflow_hidden()
-                .child(SharedString::from(text.clone()))
+                .child(
+                    StyledText::new(SharedString::from(text.clone())).with_highlights(
+                        spans
+                            .iter()
+                            .map(|(range, kind)| (range.clone(), code_style(*kind)))
+                            .collect::<Vec<_>>(),
+                    ),
+                )
                 .into_any_element(),
             Block::Rule => div().h(px(1.)).bg(theme::border()).into_any_element(),
         });
     }
     column.into_any_element()
+}
+
+fn code_style(kind: crate::highlight::Kind) -> HighlightStyle {
+    use crate::highlight::Kind;
+    let (color, italic) = match kind {
+        Kind::Keyword => (theme::primary(), false),
+        Kind::String => (theme::md_code(), false),
+        Kind::Comment => (theme::muted(), true),
+        Kind::Function => (theme::secondary(), false),
+        Kind::Type => (theme::md_strong(), false),
+        Kind::Constant => (theme::warning(), false),
+    };
+    HighlightStyle {
+        color: Some(color),
+        font_style: italic.then_some(FontStyle::Italic),
+        ..Default::default()
+    }
 }

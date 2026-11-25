@@ -12,6 +12,7 @@ mod delegate;
 mod doctor;
 mod git;
 mod headless;
+mod highlight;
 mod hooks;
 mod logging;
 mod lsp;

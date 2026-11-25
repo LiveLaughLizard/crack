@@ -153,6 +153,11 @@ fn plan(last_user_text: Option<&str>, tool_result: Option<&str>) -> Plan {
                 .collect(),
         );
     }
+    // "say: <markdown>" answers with that text (`\n` for newlines), no tools.
+    if let Some(i) = text.find("say:") {
+        let rest = text[i + 4..].lines().next().unwrap_or("").trim();
+        return Plan::Answer(rest.replace("\\n", "\n"));
+    }
     // "call: <tool> <json args>" calls any tool, e.g. an MCP one.
     if let Some(i) = text.find("call:") {
         // Only the first line: crack may append context (memories) after it.
