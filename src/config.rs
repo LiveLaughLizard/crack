@@ -34,6 +34,8 @@ pub struct Config {
     pub web_search: Option<String>,
     /// Trim long, noisy shell output before the model sees it (default true).
     pub trim_output: Option<bool>,
+    /// Check GitHub once a day for a newer crack and say so (default false).
+    pub update_check: Option<bool>,
     /// A SearXNG server for `websearch` (needs `format=json` enabled).
     pub searxng_url: Option<String>,
     /// Trim old tool output when the conversation fills this share of the context window
@@ -220,6 +222,9 @@ impl Config {
         }
         if layer.trim_output.is_some() {
             self.trim_output = layer.trim_output;
+        }
+        if layer.update_check.is_some() {
+            self.update_check = layer.update_check;
         }
         if layer.searxng_url.is_some() {
             self.searxng_url = layer.searxng_url;

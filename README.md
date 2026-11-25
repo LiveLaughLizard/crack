@@ -72,6 +72,14 @@ nix build .#airgap                                # or .#no-china, .#strict
 The package includes the desktop entry and icon. Its PATH also has git, ripgrep and
 bubblewrap.
 
+### Updating
+
+`crack update check` says whether a newer release is out; `crack update` downloads it,
+checks that `SHA256SUMS` is signed with crack's release key and that the download
+matches, then replaces the binary (keeping the old one as `crack.old`) or the AppImage.
+Nix installs update through Nix. Set `update_check = true` for a once-a-day notice in
+the window; nothing is downloaded until you run `crack update`.
+
 ## Build
 
 ```sh

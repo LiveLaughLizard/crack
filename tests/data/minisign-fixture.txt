@@ -1,0 +1,9 @@
+RWQjnnfCwenCcIOOJeKREXxOWGJ0+arb3Ag334zFojeGYOuAOt5fHYsL
+===
+019ff2d2318684f57755b56b5a26d547c9868e80a719bd17b4ad3e32e4fd270e  crack-9.9.9-default-x86_64-linux.tar.gz
+aaaa1111  other-file.tar.gz
+===
+untrusted comment: signature from minisign secret key
+RUQjnnfCwenCcB86bd0qEbKaZrvj07dXZkmR/6aGklEzVzg16jHQTtknmhHT3R/NITviclxfSHABkUlPSO92Xck6zPX/fRe9MQs=
+trusted comment: timestamp:1795649150	file:SHA256SUMS	hashed
+1WB0papOEmPatUNCzrgL3faZc2nkotShDsITg91Eh4UVUMAa0v9EUnwnWxm69aQ+nJoufWwIR66HcR91KLOABQ==

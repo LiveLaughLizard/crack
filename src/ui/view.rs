@@ -333,6 +333,7 @@ impl CrackView {
             _subscription: subscription,
         };
         view.discover_models(cx);
+        view.check_for_update(cx);
         view.refresh_git(cx);
         // Build the symbol index in the background so the first lookup is quick.
         let cwd = view.ws.cwd.clone();
@@ -2571,4 +2572,21 @@ impl CrackView {
 /// A fresh transcript list (entries are added as the session grows).
 pub(super) fn new_transcript() -> ListState {
     ListState::new(0, ListAlignment::Top, px(1200.))
+}
+
+impl CrackView {
+    /// With `update_check = true`: once a day, a notice when a newer crack is out.
+    fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        if !cfg!(feature = "cloud") || self.ws.config.update_check != Some(true) {
+            return;
+        }
+        let http = self.ws.http.clone();
+        let task = crate::runtime::spawn(async move { crate::update::daily_notice(&http).await });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Some(notice)) = task.await {
+                let _ = this.update(cx, |view, cx| view.show_toast(notice, false, cx));
+            }
+        })
+        .detach();
+    }
 }

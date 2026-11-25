@@ -90,6 +90,8 @@ similar = "2"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+# Verifies release signatures for self-update.
+minisign-verify = "0.2"
 # rmcp's credential-store trait is an async_trait.
 async-trait = "0.1"
 

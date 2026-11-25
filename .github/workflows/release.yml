@@ -90,10 +90,24 @@ jobs:
       - name: Checksums
         run: cd dist && sha256sum *.tar.gz *.AppImage > SHA256SUMS
 
+      # crack update only installs releases whose SHA256SUMS is signed with this key
+      # (its public half is built into crack). Add the secret key as the repository
+      # secret MINISIGN_SECRET_KEY.
+      - name: Sign the checksums
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          test -n "$MINISIGN_SECRET_KEY" || { echo "MINISIGN_SECRET_KEY isn't set" >&2; exit 1; }
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > $RUNNER_TEMP/minisign.key
+          minisign -S -s $RUNNER_TEMP/minisign.key -m dist/SHA256SUMS -t "crack ${GITHUB_REF_NAME}"
+          rm $RUNNER_TEMP/minisign.key
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
             dist/*.AppImage
             dist/SHA256SUMS
+            dist/SHA256SUMS.minisig
           generate_release_notes: true

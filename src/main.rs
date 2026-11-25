@@ -38,6 +38,7 @@ mod store;
 mod subagents;
 mod tools;
 mod ui;
+mod update;
 mod usage;
 mod websearch;
 mod workspace;
@@ -101,6 +102,9 @@ enum Mode {
     Export {
         common: Common,
         args: Vec<String>,
+    },
+    Update {
+        check: bool,
     },
     Usage {
         common: Common,
@@ -186,6 +190,7 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
     let extensions_mode = mode.clone();
     let plugin_mode = mode.clone();
     let export_mode = mode.clone();
+    let update_mode = mode.clone();
     let usage_mode = mode.clone();
     let doctor_mode = mode.clone();
     let completion_mode = mode.clone();
@@ -373,6 +378,14 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                             args: ctx.args().to_vec(),
                         },
                     );
+                    Ok(())
+                })
+                .build(),
+            CommandBuilder::new("update")
+                .short("Update crack from GitHub Releases (signed); `crack update check` only looks")
+                .run(move |ctx| {
+                    let check = matches!(ctx.args().first().map(String::as_str), Some("check" | "--check"));
+                    set(&update_mode, Mode::Update { check });
                     Ok(())
                 })
                 .build(),
@@ -775,6 +788,23 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
             Ok(0)
         }
         Mode::Plugin { args } => Ok(plugin_command(&args)),
+        Mode::Update { check } => {
+            if !cfg!(feature = "cloud") {
+                eprintln!("This air-gapped build doesn't update itself.");
+                return Ok(1);
+            }
+            let http = reqwest::Client::new();
+            match runtime::block_on(update::run(&http, check)) {
+                Ok(message) => {
+                    println!("{message}");
+                    Ok(0)
+                }
+                Err(error) => {
+                    eprintln!("{error:#}");
+                    Ok(1)
+                }
+            }
+        }
         Mode::Export { common, args } => {
             let (workspace, _) = load_workspace(&common)?;
             let mut id = "last".to_owned();
