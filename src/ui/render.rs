@@ -1016,7 +1016,7 @@ impl CrackView {
             .into_any_element()
     }
 
-    fn render_sidebar(&self) -> AnyElement {
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let section = |title: &str| {
             div()
                 .font_weight(FontWeight::BOLD)
@@ -1190,6 +1190,53 @@ impl CrackView {
                     .child(section("Git"))
                     .child(line),
             );
+        }
+        // Language servers this project uses: running, idle, failed, or one click to install.
+        let servers = crate::lsp::relevant(&crate::context::project_root(&self.ws.cwd));
+        if !servers.is_empty() && self.ws.config.lsp.unwrap_or(true) {
+            let hub = crate::lsp::Hub::for_project(&self.ws.cwd, None);
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .text_color(theme::muted())
+                .child(section("Language servers"));
+            for (i, (name, status)) in hub.statuses().into_iter().enumerate() {
+                let (text, color) = match &status {
+                    crate::lsp::Status::Running => ("running".to_owned(), theme::success()),
+                    crate::lsp::Status::Idle => ("ready".to_owned(), theme::text_soft()),
+                    crate::lsp::Status::Failed(why) => (format!("failed: {why}"), theme::error()),
+                    crate::lsp::Status::NotInstalled => {
+                        ("not installed".to_owned(), theme::warning())
+                    }
+                };
+                let mut row = div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(6.))
+                    .child(div().text_color(theme::text_soft()).child(name))
+                    .child(div().text_color(color).truncate().child(text));
+                let install = crate::lsp::SERVERS
+                    .iter()
+                    .find(|s| s.name == name)
+                    .and_then(|s| s.install);
+                if status == crate::lsp::Status::NotInstalled
+                    && let Some(command) = install
+                {
+                    row = row.child(
+                        div()
+                            .id(("lsp-install", i))
+                            .text_color(theme::secondary())
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(theme::text()))
+                            .child("install")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.offer_install(name.to_owned(), command.to_owned(), window, cx)
+                            })),
+                    );
+                }
+                list = list.child(row);
+            }
+            column = column.child(list);
         }
         column = column.child(
             div()
@@ -1367,7 +1414,7 @@ impl Render for CrackView {
                     .child(div().flex_1().min_h_0().child(main)),
             );
         if sidebar {
-            root = root.child(self.render_sidebar());
+            root = root.child(self.render_sidebar(cx));
         }
 
         if let Some((picker, _)) = &self.picker {

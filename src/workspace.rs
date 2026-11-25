@@ -161,6 +161,8 @@ impl Workspace {
                 self.instructions.iter().map(|i| i.path.clone()).collect(),
             )),
             checkpoint: Arc::new(crate::checkpoint::Tracker::new(snapshots)),
+            lsp: self.config.lsp.unwrap_or(true),
+            lsp_wait: std::time::Duration::from_millis(self.config.lsp_wait_ms.unwrap_or(3000)),
         }
     }
 

@@ -231,6 +231,38 @@ The sidebar shows the branch, commits ahead and behind, and the number of change
 message in the same style. The commit itself always waits for you on the approval card,
 even in YOLO mode, and it never happens in headless runs.
 
+## Code intelligence
+
+**Symbols (tree-sitter).** crack indexes the functions, types, methods and modules in
+Rust, TypeScript, JavaScript, Python, Go, C, C++ and Java, and keeps the index current as
+files change. The model gets:
+- `symbols`: a file's outline with line ranges;
+- `find_symbol`: where something is defined;
+- `read_symbol`: one definition's source, instead of the whole file.
+
+Each language is a Cargo feature (`lang-rust`, …), all on by default.
+
+**Language servers.** When a project uses Rust, TypeScript or JavaScript, Python, Go, or
+C/C++, crack starts the matching server if it's installed:
+- `rust-analyzer`;
+- `typescript-language-server`;
+- `pyright`;
+- `gopls`;
+- `clangd`.
+
+The server runs in the sandbox, since servers execute build scripts.
+
+After every `edit` or `write`, the server's errors for that file go straight to the model
+(for example "1 error: mismatched types at src/main.rs:6"), so it notices mistakes without
+running the build. The model also gets `definition`, `references`, `hover` and
+`rename_symbol`. Renames ask first, unless you're in accept-edits mode, and undo covers
+them.
+
+The sidebar shows each server's status. Missing ones get an **install** link that shows
+the exact command and runs it only after you confirm. Set `lsp = false` to turn language
+servers off, or `lsp_wait_ms` to change how long crack waits for diagnostics after an edit
+(3000 by default). Each server's log is `lsp-<name>.log` in the data folder.
+
 ## Subagents
 
 The model can hand a self-contained job to a subagent with the `task` tool. A subagent

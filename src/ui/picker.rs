@@ -40,6 +40,7 @@ pub enum PickerKind {
     Help,
     Mcp,
     Undo,
+    Install,
 }
 
 pub enum PickerEvent {

@@ -12,6 +12,7 @@ mod delegate;
 mod git;
 mod headless;
 mod hooks;
+mod lsp;
 mod mcp;
 mod policy;
 mod providers;

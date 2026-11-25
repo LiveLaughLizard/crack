@@ -68,6 +68,10 @@ pub struct ToolContext {
     pub loaded: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
     /// Snapshots files before the turn first changes them, for undo.
     pub checkpoint: Arc<crate::checkpoint::Tracker>,
+    /// Use language servers: diagnostics after edits, and the LSP tools.
+    pub lsp: bool,
+    /// How long to wait for a language server's diagnostics after an edit.
+    pub lsp_wait: Duration,
 }
 
 /// How the interface draws a finished call.
@@ -150,6 +154,9 @@ const READ_ONLY: &[&str] = &[
     "symbols",
     "find_symbol",
     "read_symbol",
+    "definition",
+    "references",
+    "hover",
 ];
 
 pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
@@ -280,6 +287,9 @@ pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
         all.extend(crate::git::specs());
     }
     all.extend(crate::code_index::specs());
+    if ctx.lsp && crate::lsp::available(&ctx.cwd) {
+        all.extend(crate::lsp::specs());
+    }
     if !ctx.skills.is_empty() {
         let mut listing = String::from(
             "Load a skill: specialized instructions and resources for a task. Call it when the task matches a skill's \
@@ -422,10 +432,25 @@ pub async fn run(name: &str, input: &Value, ctx: &ToolContext, agent: Agent) -> 
         "bash" | "write" | "edit" => {
             let tracker = ctx.checkpoint.clone();
             let _ = tokio::task::spawn_blocking(move || tracker.before_change()).await;
-            match name {
+            let result = match name {
                 "bash" => bash(input, ctx).await,
                 "write" => write(input, ctx).await,
                 _ => edit(input, ctx).await,
+            };
+            // After an edit, the language server's errors for that file go to the model.
+            match result {
+                Ok(mut output) if name != "bash" && !output.is_error && ctx.lsp => {
+                    if let Some(path) = str_arg(input, "path") {
+                        let path = resolve(&ctx.cwd, path);
+                        let hub = crate::lsp::Hub::for_project(&ctx.cwd, ctx.sandbox.clone());
+                        if let Some(report) = hub.diagnostics_after_edit(&path, ctx.lsp_wait).await
+                        {
+                            output.content.push_str(&format!("\n\n{report}"));
+                        }
+                    }
+                    Ok(output)
+                }
+                other => other,
             }
         }
         "read" => read(input, ctx).await,
@@ -435,6 +460,23 @@ pub async fn run(name: &str, input: &Value, ctx: &ToolContext, agent: Agent) -> 
         #[cfg(feature = "cloud")]
         "webfetch" => webfetch(input, ctx).await,
         git if git.starts_with("git_") => crate::git::tool(git, input, ctx).await,
+        "definition" | "references" | "hover" | "rename_symbol" => {
+            if name == "rename_symbol" {
+                let tracker = ctx.checkpoint.clone();
+                let _ = tokio::task::spawn_blocking(move || tracker.before_change()).await;
+            }
+            crate::lsp::tool(name, input, &ctx.cwd, ctx.sandbox.clone())
+                .await
+                .map(|(content, title)| {
+                    ToolOutput::ok(
+                        content,
+                        ToolMeta {
+                            title,
+                            ..Default::default()
+                        },
+                    )
+                })
+        }
         "symbols" | "find_symbol" | "read_symbol" => {
             let (name, input, cwd) = (name.to_owned(), input.clone(), ctx.cwd.clone());
             tokio::task::spawn_blocking(move || crate::code_index::tool(&name, &input, &cwd))
@@ -1150,6 +1192,8 @@ mod tests {
             allow: None,
             loaded: Default::default(),
             checkpoint: Default::default(),
+            lsp: false,
+            lsp_wait: Duration::from_secs(3),
             mcp: crate::mcp::McpHub::new(Default::default(), reqwest::Client::new()),
             sandbox: None,
         }

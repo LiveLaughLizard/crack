@@ -630,6 +630,13 @@ impl Policy {
         if let Subject::Command(command) = &call.subject {
             return self.check_command(&call, command);
         }
+        // A rename rewrites many files at once: ask first, unless edits don't ask.
+        if tool == "rename_symbol"
+            && self.mode == Mode::Normal
+            && !self.allow.iter().any(|r| r.matches(&call))
+        {
+            return Decision::Ask("renames change every file that uses the symbol".into());
+        }
         // Commits are never automatic, not even in YOLO mode.
         if tool == "git_commit" {
             return Decision::Ask("commits always ask first".into());

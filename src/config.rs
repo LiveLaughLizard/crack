@@ -37,6 +37,10 @@ pub struct Config {
     pub subagent_model: Option<String>,
     /// Model requests a subagent may make (default 60).
     pub subagent_max_steps: Option<u32>,
+    /// Use language servers when installed (default true).
+    pub lsp: Option<bool>,
+    /// How long to wait for diagnostics after an edit, in milliseconds (default 3000).
+    pub lsp_wait_ms: Option<u64>,
     /// Snapshot files around each turn for undo (default true).
     pub checkpoints: Option<bool>,
     /// Commands run at points in a turn, in Claude Code's format (`[[hooks.PreToolUse]]`).
@@ -198,6 +202,12 @@ impl Config {
         }
         if layer.subagent_max_steps.is_some() {
             self.subagent_max_steps = layer.subagent_max_steps;
+        }
+        if layer.lsp.is_some() {
+            self.lsp = layer.lsp;
+        }
+        if layer.lsp_wait_ms.is_some() {
+            self.lsp_wait_ms = layer.lsp_wait_ms;
         }
         if layer.checkpoints.is_some() {
             self.checkpoints = layer.checkpoints;

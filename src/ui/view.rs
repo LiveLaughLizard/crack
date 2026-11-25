@@ -157,6 +157,8 @@ pub struct CrackView {
     pub(super) hooks_warned: bool,
     /// The repository's branch and changes, for the sidebar.
     pub(super) git: Option<crate::git::Status>,
+    /// A language server the user may install: (name, command).
+    pub(super) pending_install: Option<(String, String)>,
     recent_models: Vec<String>,
     pub(super) discovering: bool,
     /// The window title last set; updated when the session or directory changes.
@@ -246,6 +248,7 @@ impl CrackView {
             diff_view: None,
             hooks_warned: false,
             git: None,
+            pending_install: None,
             recent_models,
             discovering: false,
             window_title: String::new(),
@@ -279,6 +282,80 @@ impl CrackView {
 
     pub fn focus_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.input.focus_handle(cx));
+    }
+
+    /// Asks before installing a language server (from the sidebar).
+    pub(super) fn offer_install(
+        &mut self,
+        name: String,
+        command: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_install = Some((name, command));
+        self.open_picker(PickerKind::Install, window, cx);
+    }
+
+    fn install_items(&self) -> Vec<PickerItem> {
+        let Some((name, command)) = &self.pending_install else {
+            return Vec::new();
+        };
+        let item = |id: &str, title: String, description: Option<String>| PickerItem {
+            id: id.into(),
+            title,
+            description,
+            category: None,
+            footer: None,
+            current: false,
+            disabled: false,
+        };
+        vec![
+            item(
+                "install",
+                format!("Install {name}"),
+                Some(format!("runs: {command}")),
+            ),
+            item("cancel", "Cancel".into(), None),
+        ]
+    }
+
+    fn run_install(&mut self, cx: &mut Context<Self>) {
+        let Some((name, command)) = self.pending_install.take() else {
+            return;
+        };
+        self.show_toast(format!("Installing {name}\u{2026}"), false, cx);
+        let cwd = self.ws.cwd.clone();
+        let task = crate::runtime::spawn(async move {
+            tokio::process::Command::new("bash")
+                .args(["-c", &command])
+                .current_dir(&cwd)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(Ok(output)) if output.status.success() => {
+                        crate::lsp::Hub::for_project(&view.ws.cwd, None).recheck_installed();
+                        view.show_toast(format!("Installed {name}."), false, cx);
+                    }
+                    Ok(Ok(output)) => {
+                        let err = String::from_utf8_lossy(&output.stderr);
+                        let last = err
+                            .lines()
+                            .rev()
+                            .find(|l| !l.trim().is_empty())
+                            .unwrap_or("it failed");
+                        view.show_toast(format!("Couldn't install {name}: {last}"), true, cx);
+                    }
+                    _ => view.show_toast(format!("Couldn't run the install for {name}."), true, cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Reads the branch and changed files for the sidebar, in the background.
@@ -936,6 +1013,7 @@ impl CrackView {
             PickerKind::Help => ("Keybindings", help_items(), false),
             PickerKind::Mcp => ("MCP servers", self.mcp_items(), true),
             PickerKind::Undo => ("Undo", self.undo_items(), true),
+            PickerKind::Install => ("Install a language server", self.install_items(), true),
         };
         let search = (kind == PickerKind::Session).then(|| {
             let root = context::project_root(&self.ws.cwd);
@@ -1024,6 +1102,13 @@ impl CrackView {
             }
             PickerKind::Help => {}
             PickerKind::Undo => self.confirm_rewind(&id, cx),
+            PickerKind::Install => {
+                if id == "install" {
+                    self.run_install(cx);
+                } else {
+                    self.pending_install = None;
+                }
+            }
             PickerKind::Mcp => {
                 if !id.is_empty() {
                     self.show_toast(format!("Reconnecting {id}…"), false, cx);
