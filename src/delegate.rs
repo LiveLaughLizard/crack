@@ -186,6 +186,8 @@ pub async fn run(
         approvals: config.approvals.clone(),
         context_window: env.registry.caps(&model_ref).context,
         compact_at: config.compact_at,
+        server_compaction: config.server_compaction,
+        clear_tool_results: config.clear_tool_results,
         context_tokens: 0,
         subagents: None,
     };

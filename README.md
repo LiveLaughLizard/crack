@@ -265,6 +265,26 @@ tab.
   marked, and undo can restore the files it changed. It then offers to continue.
   Headless runs repair a session automatically when you continue it with `-s`.
 
+## Long conversations
+
+When a conversation fills 80% of the model's context window, crack summarizes it and
+carries on from the summary; `/compact` does it by hand. Set the threshold with
+`compact_at = 0.7` in the config. Models crack doesn't know need their window set:
+`[models."provider/model"] context = 131072`.
+
+On Claude through Anthropic's own API, two beta features can help (both off by
+default; turn them on in Settings or the config):
+
+```toml
+# Claude writes the summary itself, as a signed block it reads back exactly.
+server_compaction = true
+# Claude drops old tool results once the prompt passes half the window, keeping the
+# six most recent. Each clear costs one prompt-cache rewrite.
+clear_tool_results = true
+```
+
+If server compaction fails, crack falls back to its own summary.
+
 ## Undo, redo and rewinding
 
 Before a turn first changes anything, crack snapshots the project's files, and it

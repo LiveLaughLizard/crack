@@ -137,3 +137,5 @@ landlock = "0.4"
 [dev-dependencies]
 # The MCP tests' OAuth server parses forms and checks PKCE challenges.
 url = "2"
+# Builds canned streaming responses for the provider tests.
+http = "1"

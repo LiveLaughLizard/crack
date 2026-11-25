@@ -2059,7 +2059,7 @@ impl CrackView {
         let client = self.ws.http.clone();
         self.show_toast("Compacting the conversation…", false, cx);
         let task = crate::runtime::spawn(async move {
-            crate::agent::compact(&config, &history, &client).await
+            crate::agent::compact(&config, &history, &[], &client).await
         });
         cx.spawn(async move |this, cx| {
             let Ok(result) = task.await else { return };

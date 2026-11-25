@@ -66,6 +66,13 @@ pub enum Part {
         #[serde(default)]
         is_error: bool,
     },
+    /// A summary of everything before it, written by Claude's server-side compaction.
+    /// Claude takes it back byte-for-byte (signature included); other providers get the
+    /// summary as text.
+    Compaction {
+        content: String,
+        signature: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,6 +171,12 @@ pub struct ChatRequest<'a> {
     pub tools: &'a [ToolSpec],
     pub effort: Effort,
     pub max_tokens: u32,
+    /// Ask Claude to summarize the conversation (on-demand server compaction) instead of
+    /// answering. Only first-party Anthropic endpoints honor it.
+    pub compaction: bool,
+    /// Let Claude clear old tool results once the prompt passes this many tokens
+    /// (context editing). Only first-party Anthropic endpoints honor it.
+    pub clear_tool_results_at: Option<u64>,
 }
 
 /// What a provider reports while a response streams in.
@@ -225,6 +238,15 @@ pub enum Endpoint {
 }
 
 impl Endpoint {
+    /// Whether the endpoint is Anthropic's own API, which offers server-side compaction
+    /// and context editing.
+    pub fn is_first_party_claude(&self) -> bool {
+        match self {
+            Endpoint::Anthropic(endpoint) => endpoint.first_party(),
+            Endpoint::OpenAi(_) => false,
+        }
+    }
+
     /// Whether this endpoint has a "medium" reasoning level. When it does, the
     /// `default` effort means medium; otherwise the provider's own default applies.
     pub fn has_medium_effort(&self) -> bool {

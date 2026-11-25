@@ -232,6 +232,38 @@ impl OpenAiEndpoint {
 }
 
 fn message_json(message: &Message, replay_reasoning: bool) -> Vec<Value> {
+    // A summary from Claude's server-side compaction (the session switched models):
+    // other providers read it as a user message.
+    if message
+        .parts
+        .iter()
+        .any(|p| matches!(p, Part::Compaction { .. }))
+    {
+        let mut out: Vec<Value> = message
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Compaction { content, .. } => Some(json!({
+                    "role": "user",
+                    "content": format!("Summary of the conversation so far:\n\n{content}"),
+                })),
+                _ => None,
+            })
+            .collect();
+        let rest = Message {
+            role: message.role,
+            parts: message
+                .parts
+                .iter()
+                .filter(|p| !matches!(p, Part::Compaction { .. }))
+                .cloned()
+                .collect(),
+        };
+        if !rest.parts.is_empty() {
+            out.extend(message_json(&rest, replay_reasoning));
+        }
+        return out;
+    }
     match message.role {
         Role::User => {
             let mut out = Vec::new();
@@ -470,6 +502,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn claude_compaction_reads_as_a_user_summary() {
+        let message = Message {
+            role: Role::Assistant,
+            parts: vec![Part::Compaction {
+                content: "Summary".into(),
+                signature: "sig".into(),
+            }],
+        };
+        let out = message_json(&message, false);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert!(out[0]["content"].as_str().unwrap().ends_with("Summary"));
+    }
+
+    #[test]
     fn images_go_in_a_content_array() {
         let message = Message {
             role: Role::User,
@@ -524,6 +571,8 @@ mod tests {
             tools: &[],
             effort,
             max_tokens: 64_000,
+            compaction: false,
+            clear_tool_results_at: None,
         };
         // DeepSeek: minimal switches thinking off, anything else sets the effort.
         let mut deepseek = endpoint(
@@ -575,6 +624,8 @@ mod tests {
             tools: &[],
             effort,
             max_tokens: 100,
+            compaction: false,
+            clear_tool_results_at: None,
         };
         let body = endpoint(ReasoningParam::Thinking, false).body(&request(Effort::High));
         assert_eq!(body["thinking"]["type"], "enabled");

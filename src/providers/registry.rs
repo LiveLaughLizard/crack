@@ -134,6 +134,8 @@ pub async fn test_connection(
         tools: &[],
         effort: super::Effort::Low,
         max_tokens: 64,
+        compaction: false,
+        clear_tool_results_at: None,
     };
     tokio::time::timeout(
         std::time::Duration::from_secs(60),

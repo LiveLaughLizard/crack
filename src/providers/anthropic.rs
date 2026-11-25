@@ -197,7 +197,7 @@ fn supports_fallbacks(model: &str) -> bool {
 impl AnthropicEndpoint {
     /// api.anthropic.com itself. Beta fields (server-side fallbacks, eager input
     /// streaming) are only sent there: proxies and cloud platforms may reject them.
-    fn first_party(&self) -> bool {
+    pub(crate) fn first_party(&self) -> bool {
         #[cfg(feature = "cloud")]
         return matches!(&self.platform, Platform::Direct { base_url } if base_url.contains("api.anthropic.com"));
         // Air-gapped builds only talk to self-hosted servers.
@@ -318,6 +318,21 @@ impl AnthropicEndpoint {
                 body["model"] = json!(request.model);
             }
         }
+        if direct && request.compaction {
+            // On-demand compaction: the reply is one `compaction` block summarizing the
+            // conversation. It can't be combined with `context_management`.
+            body["compaction"] = json!({"type": "summarize"});
+        } else if direct && let Some(at) = request.clear_tool_results_at {
+            // Context editing: Claude drops the oldest tool results once the prompt is
+            // this big. Clearing invalidates the prompt cache from that point, so clear a
+            // worthwhile amount each time.
+            body["context_management"] = json!({"edits": [{
+                "type": "clear_tool_uses_20250919",
+                "trigger": {"type": "input_tokens", "value": at},
+                "keep": {"type": "tool_uses", "value": 6},
+                "clear_at_least": {"type": "input_tokens", "value": (at / 5).max(10_000)},
+            }]});
+        }
         if direct && supports_fallbacks(request.model) {
             // Requests a safety classifier declines are retried on a fallback model.
             body["fallbacks"] = json!("default");
@@ -333,7 +348,24 @@ impl AnthropicEndpoint {
     ) -> anyhow::Result<Completion> {
         let url = self.url(request.model);
         let body = serde_json::to_vec(&self.body(&request))?;
-        let fallbacks = self.first_party() && supports_fallbacks(request.model);
+        let mut betas: Vec<&str> = Vec::new();
+        if self.first_party() {
+            if supports_fallbacks(request.model) {
+                betas.push("server-side-fallback-2026-07-01");
+            }
+            // Every request that carries a compaction block needs the beta too.
+            if request.compaction
+                || request
+                    .messages
+                    .iter()
+                    .any(|m| m.parts.iter().any(|p| matches!(p, Part::Compaction { .. })))
+            {
+                betas.push("compact-2026-09-04");
+            } else if request.clear_tool_results_at.is_some() {
+                betas.push("context-management-2025-06-27");
+            }
+        }
+        let betas = betas.join(",");
 
         let response = super::send_with_retry(|| async {
             let mut builder = client
@@ -343,8 +375,8 @@ impl AnthropicEndpoint {
             if self.sends_version_header() {
                 builder = builder.header("anthropic-version", "2023-06-01");
             }
-            if fallbacks {
-                builder = builder.header("anthropic-beta", "server-side-fallback-2026-07-01");
+            if !betas.is_empty() {
+                builder = builder.header("anthropic-beta", &betas);
             }
             for (name, value) in &self.headers {
                 builder = builder.header(name, value);
@@ -501,6 +533,11 @@ fn part_json(part: &Part) -> Option<Value> {
             "content": if content.is_empty() { "(no output)" } else { content },
             "is_error": is_error,
         }),
+        Part::Compaction { content, signature } => json!({
+            "type": "compaction",
+            "content": content,
+            "signature": signature,
+        }),
     })
 }
 
@@ -511,6 +548,10 @@ enum Block {
         signature: String,
     },
     Redacted(String),
+    Compaction {
+        content: String,
+        signature: String,
+    },
     Tool {
         id: String,
         name: String,
@@ -554,6 +595,11 @@ async fn read_stream(
                     "redacted_thinking" => {
                         Block::Redacted(block["data"].as_str().unwrap_or_default().to_owned())
                     }
+                    // Arrives whole in `content_block_start` (no deltas).
+                    "compaction" => Block::Compaction {
+                        content: block["content"].as_str().unwrap_or_default().to_owned(),
+                        signature: block["signature"].as_str().unwrap_or_default().to_owned(),
+                    },
                     "tool_use" => {
                         let id = block["id"].as_str().unwrap_or_default().to_owned();
                         let name = block["name"].as_str().unwrap_or_default().to_owned();
@@ -597,12 +643,24 @@ async fn read_stream(
                     ("input_json_delta", Block::Tool { json, .. }) => {
                         json.push_str(delta["partial_json"].as_str().unwrap_or_default());
                     }
+                    // In case the summary is ever streamed in pieces.
+                    ("compaction_delta", Block::Compaction { content, .. }) => {
+                        content.push_str(delta["content"].as_str().unwrap_or_default());
+                    }
                     _ => {}
                 }
             }
             "message_delta" => {
                 if let Some(output) = data["usage"]["output_tokens"].as_u64() {
                     usage.output_tokens = output;
+                }
+                // Compaction reports its tokens per iteration, with zeros at the top level.
+                if let Some(iterations) = data["usage"]["iterations"].as_array() {
+                    let sum = |key: &str| -> u64 {
+                        iterations.iter().filter_map(|i| i[key].as_u64()).sum()
+                    };
+                    usage.input_tokens = usage.input_tokens.max(sum("input_tokens"));
+                    usage.output_tokens = usage.output_tokens.max(sum("output_tokens"));
                 }
                 if let Some(reason) = data["delta"]["stop_reason"].as_str() {
                     stop = match reason {
@@ -640,6 +698,9 @@ async fn read_stream(
                 signature: None,
                 redacted: Some(data),
             }),
+            Block::Compaction { content, signature } => {
+                (!content.is_empty()).then_some(Part::Compaction { content, signature })
+            }
             Block::Tool { id, name, json } => {
                 // With eager input streaming the input is not validated server-side;
                 // invalid JSON reaches the tool runner as an error marker.
@@ -723,6 +784,8 @@ mod tests {
             tools,
             effort,
             max_tokens: 1000,
+            compaction: false,
+            clear_tool_results_at: None,
         }
     }
 
@@ -856,5 +919,100 @@ mod tests {
         assert_eq!(body["thinking"]["budget_tokens"], 10_000);
         assert!(body["max_tokens"].as_u64().unwrap() > 10_000);
         assert!(body.get("output_config").is_none());
+    }
+}
+
+#[cfg(all(test, feature = "cloud"))]
+mod compaction_tests {
+    use super::*;
+
+    fn endpoint(base_url: &str) -> AnthropicEndpoint {
+        AnthropicEndpoint {
+            platform: Platform::Direct {
+                base_url: base_url.into(),
+            },
+            auth: Auth::None,
+            headers: vec![],
+        }
+    }
+
+    fn request(messages: &[Message], compaction: bool, clear: Option<u64>) -> ChatRequest<'_> {
+        ChatRequest {
+            model: "claude-opus-5-5",
+            system: "sys",
+            messages,
+            tools: &[],
+            effort: Effort::Default,
+            max_tokens: 1000,
+            compaction,
+            clear_tool_results_at: clear,
+        }
+    }
+
+    #[test]
+    fn asks_for_compaction_or_clearing_only_on_anthropics_api() {
+        let messages = vec![Message::user_text("hi")];
+        let direct = endpoint("https://api.anthropic.com");
+        let body = direct.body(&request(&messages, true, Some(100_000)));
+        assert_eq!(body["compaction"], json!({"type": "summarize"}));
+        // The API refuses compaction and context_management together.
+        assert!(body.get("context_management").is_none());
+
+        let body = direct.body(&request(&messages, false, Some(100_000)));
+        let edit = &body["context_management"]["edits"][0];
+        assert_eq!(edit["type"], "clear_tool_uses_20250919");
+        assert_eq!(edit["trigger"]["value"], 100_000);
+        assert!(body.get("compaction").is_none());
+
+        // Proxies and other Anthropic-compatible servers don't get either.
+        let proxy = endpoint("http://localhost:8080");
+        let body = proxy.body(&request(&messages, true, Some(100_000)));
+        assert!(body.get("compaction").is_none());
+        assert!(body.get("context_management").is_none());
+    }
+
+    #[test]
+    fn compaction_block_goes_back_first_and_unchanged() {
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                parts: vec![Part::Compaction {
+                    content: "Summary".into(),
+                    signature: "EuYB".into(),
+                }],
+            },
+            Message::user_text("go on"),
+        ];
+        let json = messages_json(&messages);
+        assert_eq!(json[0]["role"], "assistant");
+        assert_eq!(
+            json[0]["content"][0],
+            json!({"type": "compaction", "content": "Summary", "signature": "EuYB"})
+        );
+        assert_eq!(json[1]["role"], "user");
+    }
+
+    #[tokio::test]
+    async fn reads_a_compaction_reply() {
+        let events = [
+            json!({"type": "message_start", "message": {"usage": {"input_tokens": 0, "output_tokens": 0}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "compaction", "content": "Summary of the conversation", "signature": "EuYB"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "compaction"}, "usage": {"input_tokens": 0, "output_tokens": 0, "iterations": [{"type": "compaction", "input_tokens": 144, "output_tokens": 276}]}}),
+            json!({"type": "message_stop"}),
+        ];
+        let body: String = events
+            .iter()
+            .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+            .collect();
+        let response = reqwest::Response::from(http::Response::new(body));
+        let mut sink = |_| {};
+        let completion = read_stream(response, &mut sink).await.unwrap();
+        assert!(matches!(
+            completion.message.parts.as_slice(),
+            [Part::Compaction { content, signature }] if content == "Summary of the conversation" && signature == "EuYB"
+        ));
+        assert_eq!(completion.usage.input_tokens, 144);
+        assert_eq!(completion.usage.output_tokens, 276);
     }
 }

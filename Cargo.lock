@@ -1257,6 +1257,7 @@ dependencies = [
  "grep",
  "hex",
  "hmac",
+ "http",
  "ignore",
  "landlock",
  "libc",

@@ -100,6 +100,10 @@ pub struct TurnConfig {
     pub context_window: Option<u64>,
     /// Compact when the context passes this share of the window.
     pub compact_at: f64,
+    /// Use Claude's server-side compaction when the endpoint offers it.
+    pub server_compaction: bool,
+    /// Let Claude clear old tool results (context editing) when the endpoint offers it.
+    pub clear_tool_results: bool,
     /// How full the context was at the end of the last turn.
     pub context_tokens: u64,
 }
@@ -269,7 +273,7 @@ pub(crate) async fn turn_loop(
                 .run("PreCompact", None, json!({"trigger": "auto"}))
                 .await;
             notify(events, &outcome.notices);
-            match compact(config, history, &client).await {
+            match compact(config, history, &specs, &client).await {
                 Ok(summary) => {
                     let _ = events.send(AgentEvent::Compacted {
                         messages: summary.clone(),
@@ -315,6 +319,13 @@ pub(crate) async fn turn_loop(
                     tools: &specs,
                     effort: config.effort,
                     max_tokens: config.max_tokens,
+                    compaction: false,
+                    // Clear old tool results at half the window, well before compacting.
+                    clear_tool_results_at: config.clear_tool_results.then(|| {
+                        config
+                            .context_window
+                            .map_or(100_000, |w| (w / 2).max(50_000))
+                    }),
                 },
                 &mut sink,
             )
@@ -676,6 +687,7 @@ pub fn estimate_tokens(history: &[Message]) -> u64 {
             Part::Text { text } | Part::Thinking { text, .. } => text.len(),
             Part::ToolUse { input, .. } => input.to_string().len(),
             Part::ToolResult { content, .. } => content.len(),
+            Part::Compaction { content, .. } => content.len(),
             // Providers charge roughly 1,600 tokens for a typical screenshot.
             Part::Image { .. } => 6_400,
         })
@@ -688,6 +700,7 @@ pub fn estimate_tokens(history: &[Message]) -> u64 {
 pub async fn compact(
     config: &TurnConfig,
     history: &[Message],
+    tools: &[crate::providers::ToolSpec],
     client: &reqwest::Client,
 ) -> anyhow::Result<Vec<Message>> {
     // The newest plain user message, when the turn has only just begun.
@@ -698,6 +711,25 @@ pub async fn compact(
             let has_results = m.parts.iter().any(|p| matches!(p, Part::ToolResult { .. }));
             (!has_results).then(|| m.text())
         });
+    let next = match &latest_request {
+        Some(request) => format!("Now handle the user's latest request:\n\n{request}"),
+        None => "Continue the task in progress from where the summary ends.".to_owned(),
+    };
+    if config.server_compaction && config.endpoint.is_first_party_claude() {
+        match server_compact(config, history, tools, client).await {
+            Ok(block) => {
+                // The block must come first, as an assistant message of its own.
+                return Ok(vec![
+                    Message {
+                        role: Role::Assistant,
+                        parts: vec![block],
+                    },
+                    Message::user_text(next),
+                ]);
+            }
+            Err(error) => tracing::warn!("server compaction failed, summarizing here: {error:#}"),
+        }
+    }
     let mut request_history = history.to_vec();
     // Ask in the last user message when there is one (after tool results), so roles
     // still alternate.
@@ -719,6 +751,8 @@ pub async fn compact(
                 tools: &[],
                 effort: Effort::Low,
                 max_tokens: 16_000,
+                compaction: false,
+                clear_tool_results_at: None,
             },
             &mut sink,
         )
@@ -727,13 +761,49 @@ pub async fn compact(
     if summary.trim().is_empty() {
         anyhow::bail!("the model returned an empty summary");
     }
-    let next = match latest_request {
-        Some(request) => format!("Now handle the user's latest request:\n\n{request}"),
-        None => "Continue the task in progress from where the summary ends.".to_owned(),
-    };
     Ok(vec![Message::user_text(format!(
         "This conversation was compacted to save context. Summary of everything so far:\n\n{summary}\n\n{next}"
     ))])
+}
+
+/// Asks Claude to compact the conversation itself (on-demand server compaction) and
+/// returns its `compaction` block. Sends the conversation's own system prompt and
+/// tools, as the API asks, so the cached prefix is reused.
+async fn server_compact(
+    config: &TurnConfig,
+    history: &[Message],
+    tools: &[crate::providers::ToolSpec],
+    client: &reqwest::Client,
+) -> anyhow::Result<Part> {
+    let mut sink = |_| {};
+    let completion = config
+        .endpoint
+        .complete(
+            client,
+            ChatRequest {
+                model: &config.model,
+                system: &config.system,
+                messages: history,
+                tools,
+                effort: config.effort,
+                max_tokens: config.max_tokens,
+                compaction: true,
+                clear_tool_results_at: None,
+            },
+            &mut sink,
+        )
+        .await?;
+    tracing::info!(
+        input = completion.usage.input_tokens,
+        output = completion.usage.output_tokens,
+        "server compaction"
+    );
+    completion
+        .message
+        .parts
+        .into_iter()
+        .find(|p| matches!(p, Part::Compaction { .. }))
+        .ok_or_else(|| anyhow::anyhow!("the reply had no compaction block"))
 }
 
 /// Shows hook output in the transcript.

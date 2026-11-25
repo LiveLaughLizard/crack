@@ -30,6 +30,12 @@ pub struct Config {
     pub models: BTreeMap<String, crate::providers::models::ModelCaps>,
     /// Compact the conversation when it fills this share of the context window (0.8).
     pub compact_at: Option<f64>,
+    /// On Claude (Anthropic's own API), let the server write the compaction summary
+    /// (beta). Off by default.
+    pub server_compaction: Option<bool>,
+    /// On Claude (Anthropic's own API), let the server clear old tool results as the
+    /// context fills (context editing, beta). Off by default.
+    pub clear_tool_results: Option<bool>,
     /// How many subagents may run at once (default 4).
     pub max_parallel_agents: Option<usize>,
     /// The model for `explore` and other "small" subagents (default: a smaller model
@@ -195,6 +201,12 @@ impl Config {
         self.models.extend(layer.models);
         if layer.compact_at.is_some() {
             self.compact_at = layer.compact_at;
+        }
+        if layer.server_compaction.is_some() {
+            self.server_compaction = layer.server_compaction;
+        }
+        if layer.clear_tool_results.is_some() {
+            self.clear_tool_results = layer.clear_tool_results;
         }
         if layer.max_parallel_agents.is_some() {
             self.max_parallel_agents = layer.max_parallel_agents;
@@ -463,6 +475,20 @@ pub fn set_user_value(table: &str, key: &str, value: toml_edit::Value) -> anyhow
         doc[table] = toml_edit::Item::Table(toml_edit::Table::new());
     }
     doc[table][key] = toml_edit::Item::Value(value);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, doc.to_string())?;
+    Ok(path)
+}
+
+/// Sets a top-level key in the user's own config file.
+pub fn set_user_top_value(key: &str, value: toml_edit::Value) -> anyhow::Result<PathBuf> {
+    let path = global_dir()
+        .ok_or_else(|| anyhow::anyhow!("no config folder"))?
+        .join("config.toml");
+    let mut doc = read_doc(&path)?;
+    doc[key] = toml_edit::Item::Value(value);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

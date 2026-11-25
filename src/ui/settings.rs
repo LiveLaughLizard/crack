@@ -69,6 +69,21 @@ impl CrackView {
                 false,
             ));
         }
+        if cfg!(feature = "cloud") {
+            let on_off = |v: Option<bool>| if v.unwrap_or(false) { "on" } else { "off" };
+            items.push(item(
+                "server_compaction",
+                "Claude: server-side compaction (beta)",
+                on_off(self.ws.config.server_compaction).into(),
+                false,
+            ));
+            items.push(item(
+                "clear_tool_results",
+                "Claude: clear old tool results (beta)",
+                on_off(self.ws.config.clear_tool_results).into(),
+                false,
+            ));
+        }
         if !cfg!(feature = "force-sandbox") {
             items.push(item(
                 "sandbox",
@@ -94,7 +109,7 @@ impl CrackView {
         for i in &mut items {
             i.category = Some(match i.id.as_str() {
                 "theme" | "font" => "Appearance".into(),
-                "effort" | "mode" => "Agent".into(),
+                "effort" | "mode" | "server_compaction" | "clear_tool_results" => "Agent".into(),
                 _ => "Permissions".into(),
             });
         }
@@ -173,6 +188,21 @@ impl CrackView {
             }
             "network" => {
                 self.toggle_sandbox(true, cx);
+                self.open_picker(PickerKind::Settings, window, cx);
+            }
+            key @ ("server_compaction" | "clear_tool_results") => {
+                let config = &mut self.ws.config;
+                let slot = if key == "server_compaction" {
+                    &mut config.server_compaction
+                } else {
+                    &mut config.clear_tool_results
+                };
+                let on = !slot.unwrap_or(false);
+                *slot = Some(on);
+                match crate::config::set_user_top_value(key, on.into()) {
+                    Ok(path) => self.show_toast(format!("Saved to {}", path.display()), false, cx),
+                    Err(error) => self.show_toast(format!("Couldn't save: {error:#}"), true, cx),
+                }
                 self.open_picker(PickerKind::Settings, window, cx);
             }
             other => {
