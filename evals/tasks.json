@@ -32,7 +32,7 @@
     "mock_prompt": "run: sed -i 's/\"TODO\"/\"5B2C711C\"/' src/alpha.rs && sed -i 's/\"TODO\"/\"EE6DD58C\"/' src/bravo.rs && sed -i 's/\"TODO\"/\"B46BB77D\"/' src/charlie.rs && sed -i 's/\"TODO\"/\"5C0755C4\"/' src/delta.rs && sed -i 's/\"TODO\"/\"DFC04EF0\"/' src/echo.rs && sed -i 's/\"TODO\"/\"BF5768BF\"/' src/foxtrot.rs && sed -i 's/\"TODO\"/\"33AFC9F6\"/' src/golf.rs && sed -i 's/\"TODO\"/\"6DEDB5D8\"/' src/hotel.rs && sed -i 's/\"TODO\"/\"1CE09153\"/' src/india.rs && sed -i 's/\"TODO\"/\"1EA596CC\"/' src/juliett.rs && sed -i 's/\"TODO\"/\"345F0EF6\"/' src/kilo.rs && sed -i 's/\"TODO\"/\"5043787D\"/' src/lima.rs",
     "check": "cargo test --quiet",
     "max_steps": 60,
-    "config": "[models.\"MODEL\"]\ncontext = 60000"
+    "config": "[models.\"MODEL\"]\ncontext = 30000"
   },
   {
     "name": "many-modules-notrim",
@@ -42,6 +42,6 @@
     "mock_prompt": "run: sed -i 's/\"TODO\"/\"5B2C711C\"/' src/alpha.rs && sed -i 's/\"TODO\"/\"EE6DD58C\"/' src/bravo.rs && sed -i 's/\"TODO\"/\"B46BB77D\"/' src/charlie.rs && sed -i 's/\"TODO\"/\"5C0755C4\"/' src/delta.rs && sed -i 's/\"TODO\"/\"DFC04EF0\"/' src/echo.rs && sed -i 's/\"TODO\"/\"BF5768BF\"/' src/foxtrot.rs && sed -i 's/\"TODO\"/\"33AFC9F6\"/' src/golf.rs && sed -i 's/\"TODO\"/\"6DEDB5D8\"/' src/hotel.rs && sed -i 's/\"TODO\"/\"1CE09153\"/' src/india.rs && sed -i 's/\"TODO\"/\"1EA596CC\"/' src/juliett.rs && sed -i 's/\"TODO\"/\"345F0EF6\"/' src/kilo.rs && sed -i 's/\"TODO\"/\"5043787D\"/' src/lima.rs",
     "check": "cargo test --quiet",
     "max_steps": 60,
-    "config": "trim_at = 0.95\n\n[models.\"MODEL\"]\ncontext = 60000"
+    "config": "trim_at = 0.95\n\n[models.\"MODEL\"]\ncontext = 30000"
   }
 ]
