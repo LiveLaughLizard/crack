@@ -2069,14 +2069,22 @@ impl CrackView {
             .max(crate::agent::estimate_tokens(&history));
         let client = self.ws.http.clone();
         self.show_toast("Compacting the conversation…", false, cx);
+        let session_id = self.session.id.clone();
+        let cwd = self.ws.cwd.clone();
         let task = crate::runtime::spawn(async move {
-            crate::agent::compact(&config, &history, &[], &client).await
+            let (messages, usage) = crate::agent::compact(&config, &history, &[], &client).await?;
+            let cost = crate::agent::log_usage(&config, &session_id, &cwd, &usage);
+            anyhow::Ok((messages, cost))
         });
         cx.spawn(async move |this, cx| {
             let Ok(result) = task.await else { return };
             let _ = this.update(cx, |view, cx| {
+                let mut cost = None;
                 let event = match result {
-                    Ok(messages) => crate::agent::AgentEvent::Compacted { messages, before },
+                    Ok((messages, spent)) => {
+                        cost = spent;
+                        crate::agent::AgentEvent::Compacted { messages, before }
+                    }
                     Err(error) => {
                         crate::agent::AgentEvent::Error(format!("Couldn't compact: {error:#}"))
                     }
@@ -2090,6 +2098,9 @@ impl CrackView {
                 };
                 if let Some(session) = session {
                     session.apply(&event, agent, &model);
+                    if let Some(cost) = cost {
+                        session.apply(&crate::agent::AgentEvent::Cost(cost), agent, &model);
+                    }
                 }
                 view.save_tab(tab);
                 cx.notify();

@@ -309,7 +309,8 @@ pub(crate) async fn turn_loop(
                 .await;
             notify(events, &outcome.notices);
             match compact(config, history, &specs, &client).await {
-                Ok(summary) => {
+                Ok((summary, usage)) => {
+                    record_usage(config, ctx, &usage, events);
                     let _ = events.send(AgentEvent::Compacted {
                         messages: summary.clone(),
                         before: context,
@@ -737,7 +738,7 @@ pub async fn compact(
     history: &[Message],
     tools: &[crate::providers::ToolSpec],
     client: &reqwest::Client,
-) -> anyhow::Result<Vec<Message>> {
+) -> anyhow::Result<(Vec<Message>, Usage)> {
     // The newest plain user message, when the turn has only just begun.
     let latest_request = history
         .last()
@@ -750,17 +751,26 @@ pub async fn compact(
         Some(request) => format!("Now handle the user's latest request:\n\n{request}"),
         None => "Continue the task in progress from where the summary ends.".to_owned(),
     };
+    // Tokens spent on a server attempt that fell back still count.
+    let mut spent = Usage::default();
     if config.server_compaction && config.endpoint.is_first_party_claude() {
         match server_compact(config, history, tools, client).await {
-            Ok(block) => {
+            Ok((Some(block), usage)) => {
                 // The block must come first, as an assistant message of its own.
-                return Ok(vec![
-                    Message {
-                        role: Role::Assistant,
-                        parts: vec![block],
-                    },
-                    Message::user_text(next),
-                ]);
+                return Ok((
+                    vec![
+                        Message {
+                            role: Role::Assistant,
+                            parts: vec![block],
+                        },
+                        Message::user_text(next),
+                    ],
+                    usage,
+                ));
+            }
+            Ok((None, usage)) => {
+                tracing::warn!("server compaction returned no block, summarizing here");
+                spent.add(usage);
             }
             Err(error) => tracing::warn!("server compaction failed, summarizing here: {error:#}"),
         }
@@ -796,9 +806,13 @@ pub async fn compact(
     if summary.trim().is_empty() {
         anyhow::bail!("the model returned an empty summary");
     }
-    Ok(vec![Message::user_text(format!(
-        "This conversation was compacted to save context. Summary of everything so far:\n\n{summary}\n\n{next}"
-    ))])
+    spent.add(completion.usage);
+    Ok((
+        vec![Message::user_text(format!(
+            "This conversation was compacted to save context. Summary of everything so far:\n\n{summary}\n\n{next}"
+        ))],
+        spent,
+    ))
 }
 
 /// Asks Claude to compact the conversation itself (on-demand server compaction) and
@@ -809,7 +823,7 @@ async fn server_compact(
     history: &[Message],
     tools: &[crate::providers::ToolSpec],
     client: &reqwest::Client,
-) -> anyhow::Result<Part> {
+) -> anyhow::Result<(Option<Part>, Usage)> {
     let mut sink = |_| {};
     let completion = config
         .endpoint
@@ -833,12 +847,12 @@ async fn server_compact(
         output = completion.usage.output_tokens,
         "server compaction"
     );
-    completion
+    let block = completion
         .message
         .parts
         .into_iter()
-        .find(|p| matches!(p, Part::Compaction { .. }))
-        .ok_or_else(|| anyhow::anyhow!("the reply had no compaction block"))
+        .find(|p| matches!(p, Part::Compaction { .. }));
+    Ok((block, completion.usage))
 }
 
 /// Shows hook output in the transcript.
@@ -850,10 +864,22 @@ fn notify(events: &Events, notices: &[String]) {
 
 /// Logs a request's tokens and cost, and reports the cost to the session.
 fn record_usage(config: &TurnConfig, ctx: &ToolContext, usage: &Usage, events: &Events) {
-    let cost = config.caps.cost(usage);
-    let project = crate::memory::project_key(&ctx.cwd);
-    crate::usage::get().record(&ctx.session_id, &project, &config.model_ref, usage, cost);
+    let cost = log_usage(config, &ctx.session_id, &ctx.cwd, usage);
     let _ = events.send(AgentEvent::Cost(cost.unwrap_or(0.0)));
+}
+
+/// Writes a request's tokens and cost to the usage log; returns the cost when the
+/// model's price is known.
+pub fn log_usage(
+    config: &TurnConfig,
+    session: &str,
+    cwd: &std::path::Path,
+    usage: &Usage,
+) -> Option<f64> {
+    let cost = config.caps.cost(usage);
+    let project = crate::memory::project_key(cwd);
+    crate::usage::get().record(session, &project, &config.model_ref, usage, cost);
+    cost
 }
 
 /// How a trimmed tool result starts, so it isn't trimmed twice.
