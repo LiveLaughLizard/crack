@@ -147,6 +147,9 @@ const READ_ONLY: &[&str] = &[
     "git_diff",
     "git_log",
     "git_show",
+    "symbols",
+    "find_symbol",
+    "read_symbol",
 ];
 
 pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
@@ -276,6 +279,7 @@ pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
     if ctx.cwd.ancestors().any(|d| d.join(".git").exists()) {
         all.extend(crate::git::specs());
     }
+    all.extend(crate::code_index::specs());
     if !ctx.skills.is_empty() {
         let mut listing = String::from(
             "Load a skill: specialized instructions and resources for a task. Call it when the task matches a skill's \
@@ -361,6 +365,9 @@ pub fn title(name: &str, input: &Value) -> String {
                 .filter(|s| !s.is_empty())
                 .unwrap_or("general")
         ),
+        "symbols" => format!("Symbols in {}", arg("path")),
+        "find_symbol" => format!("Find symbol \"{}\"", arg("name")),
+        "read_symbol" => format!("Read symbol {}", arg("name")),
         "git_status" => "git status".into(),
         "git_diff" => format!("git diff {}", arg("path")).trim_end().to_owned(),
         "git_log" => format!("git log {}", arg("path")).trim_end().to_owned(),
@@ -428,6 +435,22 @@ pub async fn run(name: &str, input: &Value, ctx: &ToolContext, agent: Agent) -> 
         #[cfg(feature = "cloud")]
         "webfetch" => webfetch(input, ctx).await,
         git if git.starts_with("git_") => crate::git::tool(git, input, ctx).await,
+        "symbols" | "find_symbol" | "read_symbol" => {
+            let (name, input, cwd) = (name.to_owned(), input.clone(), ctx.cwd.clone());
+            tokio::task::spawn_blocking(move || crate::code_index::tool(&name, &input, &cwd))
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|r| r)
+                .map(|(content, title)| {
+                    ToolOutput::ok(
+                        content,
+                        ToolMeta {
+                            title,
+                            ..Default::default()
+                        },
+                    )
+                })
+        }
         "todowrite" => todowrite(input, ctx),
         "skill" => skill(input, ctx).await,
         mcp if mcp.starts_with("mcp__") => {

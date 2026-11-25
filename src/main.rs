@@ -5,6 +5,7 @@
 
 mod agent;
 mod checkpoint;
+mod code_index;
 mod config;
 mod context;
 mod delegate;

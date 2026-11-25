@@ -259,6 +259,14 @@ impl CrackView {
         };
         view.discover_models(cx);
         view.refresh_git(cx);
+        // Build the symbol index in the background so the first lookup is quick.
+        let cwd = view.ws.cwd.clone();
+        crate::runtime::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::code_index::for_project(&cwd).and_then(|index| index.refresh())
+            })
+            .await;
+        });
         view.connect_mcp(None, cx);
         if plain_launch {
             view.restore_tabs(cx);

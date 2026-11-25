@@ -36,6 +36,9 @@ pub struct AgentDef {
 }
 
 pub const READ_ONLY_TOOLS: &[&str] = &[
+    "symbols",
+    "find_symbol",
+    "read_symbol",
     "read",
     "glob",
     "grep",
