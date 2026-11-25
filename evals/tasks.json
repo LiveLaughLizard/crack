@@ -1,0 +1,27 @@
+[
+  {
+    "name": "fix-failing-test",
+    "fixture": "fix-test",
+    "prompt": "The test suite fails. Find the bug and fix it so `cargo test` passes. Don't change the tests.",
+    "mock_prompt": "run: sed -i 's/a - b/a + b/' src/lib.rs",
+    "check": "cargo test --quiet && grep -q 'assert_eq!(add(2, 3), 5)' src/lib.rs",
+    "max_steps": 20
+  },
+  {
+    "name": "rename-across-files",
+    "fixture": "rename",
+    "prompt": "Rename the function `compute_total` to `order_total` everywhere it's defined or used, including the tests. Make sure everything still builds and the tests pass.",
+    "mock_prompt": "run: sed -i 's/compute_total/order_total/g' src/lib.rs src/cart.rs src/report.rs tests/totals.rs",
+    "check": "cargo test --quiet && ! grep -rq compute_total src tests && grep -q 'pub fn order_total' src/lib.rs",
+    "max_steps": 25
+  },
+  {
+    "name": "add-feature",
+    "fixture": "add-feature",
+    "prompt": "Add a public function `slugify(text: &str) -> String` to src/lib.rs that lowercases the text, keeps only ASCII letters and digits, and joins the remaining words with single dashes (no leading, trailing or repeated dashes; an empty input gives an empty string). For example \"Hello, World!\" becomes \"hello-world\". Add a unit test for it and make sure `cargo test` passes.",
+    "mock_prompt": "run: printf '%s\\n' '' '/// Lowercase ASCII words joined by single dashes.' 'pub fn slugify(text: &str) -> String {' '    text.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(|w| w.to_ascii_lowercase()).collect::<Vec<_>>().join(\"-\")' '}' >> src/lib.rs",
+    "hidden": "add-feature",
+    "check": "cargo test --quiet",
+    "max_steps": 25
+  }
+]

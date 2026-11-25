@@ -51,6 +51,18 @@ dev-mock dir="." *args:
 headless-mock prompt="run: ls" *args:
     CRACK_BASE_URL=http://{{mock_addr}}/v1 cargo run --quiet -- run -m custom/mock {{args}} "{{prompt}}"
 
+# --- evals ------------------------------------------------------------------
+
+# Run the coding evals against the scripted mock (checks the whole pipeline, free)
+eval *args:
+    cargo build --quiet --bin crack --example mock_provider
+    evals/run.sh {{args}}
+
+# Run the coding evals against a real model, stopping once BUDGET dollars are spent
+eval-model model budget="2" *args:
+    cargo build --quiet --bin crack
+    evals/run.sh --model {{model}} --max-cost {{budget}} {{args}}
+
 # --- check ------------------------------------------------------------------
 
 # Run the unit tests

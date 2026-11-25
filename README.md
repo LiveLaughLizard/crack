@@ -574,6 +574,21 @@ run by hand. `crack skills` lists what was found.
 `bash`, `read`, `write`, `edit`, `glob`, `grep`, `list`, `webfetch`, `todowrite`, and
 `skill`. The Plan agent gets the read-only ones.
 
+## Evals
+
+`just eval` runs scripted coding tasks against small fixture repositories:
+- fix a failing test;
+- rename a function across files;
+- add a feature, checked by hidden tests.
+
+Each task runs in a temporary copy, and the repository's own tests judge the result. By
+default the tasks run against the built-in mock, which checks crack's whole pipeline for
+free. `just eval-model provider/model 2` runs them against a real model and stops once $2
+is spent.
+
+Every run appends pass, time, tokens and cost to `evals/results/<date>.jsonl`, so model or
+crack regressions show up. See [evals/README.md](evals/README.md).
+
 ## Development
 
 `just` lists the tasks: `just dev`, `just headless "<prompt>"`, `just check` (fmt, clippy,
