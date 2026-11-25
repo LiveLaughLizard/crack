@@ -406,6 +406,14 @@ fn save(connection: &mut Connection, write: &SessionWrite) -> anyhow::Result<()>
             insert.execute(params![write.id, (write.messages_from + i) as i64, data])?;
         }
     }
+    // Compaction can shorten the history.
+    tx.execute(
+        "DELETE FROM messages WHERE session = ?1 AND seq >= ?2",
+        params![
+            write.id,
+            (write.messages_from + write.messages.len()) as i64
+        ],
+    )?;
     tx.execute(
         "DELETE FROM entries WHERE session = ?1 AND seq >= ?2",
         params![write.id, write.entries_from as i64],
@@ -432,6 +440,7 @@ fn save(connection: &mut Connection, write: &SessionWrite) -> anyhow::Result<()>
 mod tests {
     use super::*;
     use crate::agent::AgentEvent;
+    use crate::providers::Message;
     use crate::session::{Entry, Session, ToolState};
     use crate::tools::{Agent, ToolMeta};
 
@@ -499,6 +508,33 @@ mod tests {
             }
         )));
         assert!(matches!(loaded.entries.last(), Some(Entry::Footer { .. })));
+
+        // Compaction replaces the history with a shorter one; the store must shrink too.
+        session.apply(
+            &AgentEvent::Message(Message::user_text("more")),
+            Agent::Build,
+            "m",
+        );
+        session.apply(
+            &AgentEvent::Message(Message::user_text("and more")),
+            Agent::Build,
+            "m",
+        );
+        session.save_to(&store);
+        let summary = vec![Message::user_text("summary")];
+        session.apply(
+            &AgentEvent::Compacted {
+                messages: summary,
+                before: 9000,
+            },
+            Agent::Build,
+            "m",
+        );
+        session.save_to(&store);
+        assert!(store.flush().is_empty());
+        let loaded = Session::load_from(&store, &session.id).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].text(), "summary");
 
         // Listing, search and delete.
         let listed = store.list_sessions(&project, None);

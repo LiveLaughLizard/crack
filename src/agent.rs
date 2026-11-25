@@ -425,7 +425,14 @@ pub async fn compact(
             (!has_results).then(|| m.text())
         });
     let mut request_history = history.to_vec();
-    request_history.push(Message::user_text(SUMMARY_PROMPT));
+    // Ask in the last user message when there is one (after tool results), so roles
+    // still alternate.
+    match request_history.last_mut() {
+        Some(last) if last.role == Role::User => last.parts.push(Part::Text {
+            text: SUMMARY_PROMPT.to_owned(),
+        }),
+        _ => request_history.push(Message::user_text(SUMMARY_PROMPT)),
+    }
     let mut sink = |_| {};
     let completion = config
         .endpoint

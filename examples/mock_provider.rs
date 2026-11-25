@@ -113,6 +113,11 @@ enum Plan {
 /// Decides the reply from the last message: a tool call for a fresh prompt, an
 /// answer after a tool result.
 fn plan(last_user_text: Option<&str>, tool_result: Option<&str>) -> Plan {
+    if last_user_text.is_some_and(|t| t.contains("Summarize this conversation so that")) {
+        return Plan::Answer(
+            "## Goal\nThe user is testing crack.\n\n## Next\nAnswer the latest request.".into(),
+        );
+    }
     if let Some(result) = tool_result {
         let first: String = result.lines().take(3).collect::<Vec<_>>().join(" / ");
         return Plan::Answer(format!(
@@ -120,7 +125,7 @@ fn plan(last_user_text: Option<&str>, tool_result: Option<&str>) -> Plan {
         ));
     }
     let text = last_user_text.unwrap_or_default();
-    if text.starts_with("Summarize this conversation") {
+    if text.contains("Summarize this conversation so that") {
         return Plan::Answer(
             "## Goal\nThe user is testing crack.\n\n## Next\nAnswer the latest request.".into(),
         );
@@ -198,7 +203,7 @@ fn openai(request: &Value) -> Vec<String> {
     }
     out.push(format!(
         "data: {}\n\n",
-        json!({"choices": [], "usage": {"prompt_tokens": 1234, "completion_tokens": 56}})
+        json!({"choices": [], "usage": {"prompt_tokens": request.to_string().len() / 4, "completion_tokens": 56}})
     ));
     out.push("data: [DONE]\n\n".into());
     out
