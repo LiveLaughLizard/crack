@@ -2,7 +2,6 @@
 //! `CRACK_THEME=light` or `theme = "light"` in the config.
 
 use gpui::{App, Hsla, Pixels, SharedString, px, rgb};
-use std::sync::OnceLock;
 
 pub struct Palette {
     bg: u32,
@@ -103,15 +102,32 @@ const LIGHT: Palette = Palette {
     backdrop: 0x2D2242,
 };
 
-static PALETTE: OnceLock<&'static Palette> = OnceLock::new();
+static LIGHT_THEME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn p() -> &'static Palette {
-    PALETTE.get().copied().unwrap_or(&DARK)
+    if LIGHT_THEME.load(std::sync::atomic::Ordering::Relaxed) {
+        &LIGHT
+    } else {
+        &DARK
+    }
 }
 
+/// Picks the palette: `CRACK_THEME`, then the Settings choice, then the config.
 pub fn init_palette(name: Option<&str>) {
-    let light = std::env::var("CRACK_THEME").ok().as_deref().or(name) == Some("light");
-    let _ = PALETTE.set(if light { &LIGHT } else { &DARK });
+    let chosen = crate::state::State::load().theme;
+    let theme = std::env::var("CRACK_THEME")
+        .ok()
+        .or(chosen)
+        .or(name.map(str::to_owned));
+    set_light(theme.as_deref() == Some("light"));
+}
+
+pub fn set_light(light: bool) {
+    LIGHT_THEME.store(light, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_light() -> bool {
+    LIGHT_THEME.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub fn c(hex: u32) -> Hsla {
@@ -196,34 +212,51 @@ pub const TEXT_SIZE: Pixels = px(14.);
 pub const SMALL_SIZE: Pixels = px(13.);
 pub const LINE_HEIGHT: Pixels = px(21.);
 
-static FONT: OnceLock<SharedString> = OnceLock::new();
+static FONT: std::sync::RwLock<Option<SharedString>> = std::sync::RwLock::new(None);
 
 /// The interface font: `CRACK_FONT`, or the first installed of a list of monospace
 /// fonts.
 pub fn init_font(cx: &App) {
     let installed = cx.text_system().all_font_names();
-    let preferred = std::env::var("CRACK_FONT").ok();
-    let candidates = preferred.iter().map(String::as_str).chain([
-        "JetBrains Mono",
-        "Berkeley Mono",
-        "Iosevka",
-        "Fira Code",
-        "Fira Mono",
-        "Cascadia Code",
-        "Source Code Pro",
-        "Hack",
-        "DejaVu Sans Mono",
-        "Menlo",
-        "Consolas",
-        "Liberation Mono",
-    ]);
+    let preferred = std::env::var("CRACK_FONT")
+        .ok()
+        .or(crate::state::State::load().font);
+    let candidates = preferred
+        .iter()
+        .map(String::as_str)
+        .chain(MONOSPACE_FONTS.iter().copied());
     let font = candidates
         .into_iter()
         .find(|name| installed.iter().any(|f| f == name))
         .unwrap_or("monospace");
-    let _ = FONT.set(font.to_owned().into());
+    set_font(font);
 }
 
+pub fn set_font(name: &str) {
+    if let Ok(mut font) = FONT.write() {
+        *font = Some(name.to_owned().into());
+    }
+}
+
+/// Monospace fonts crack looks for, in order.
+pub const MONOSPACE_FONTS: &[&str] = &[
+    "JetBrains Mono",
+    "Berkeley Mono",
+    "Iosevka",
+    "Fira Code",
+    "Fira Mono",
+    "Cascadia Code",
+    "Source Code Pro",
+    "Hack",
+    "DejaVu Sans Mono",
+    "Menlo",
+    "Consolas",
+    "Liberation Mono",
+];
+
 pub fn font() -> SharedString {
-    FONT.get().cloned().unwrap_or_else(|| "monospace".into())
+    FONT.read()
+        .ok()
+        .and_then(|f| f.clone())
+        .unwrap_or_else(|| "monospace".into())
 }

@@ -453,6 +453,23 @@ pub fn save_mcp_oauth(path: &Path, url: &str, json: Option<&str>) -> anyhow::Res
 
 /// Adds a permission rule to the project's config (`.crack/config.toml`, or an
 /// existing `crack.toml`), for "always allow".
+/// Sets `table.key = value` in the user's own config (`~/.config/crack/config.toml`).
+pub fn set_user_value(table: &str, key: &str, value: toml_edit::Value) -> anyhow::Result<PathBuf> {
+    let path = global_dir()
+        .ok_or_else(|| anyhow::anyhow!("no config folder"))?
+        .join("config.toml");
+    let mut doc = read_doc(&path)?;
+    if !doc.contains_key(table) {
+        doc[table] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    doc[table][key] = toml_edit::Item::Value(value);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, doc.to_string())?;
+    Ok(path)
+}
+
 pub fn add_permission_rule(cwd: &Path, list: &str, rule: &str) -> anyhow::Result<PathBuf> {
     let root = crate::context::project_root(cwd);
     let path = [root.join("crack.toml"), root.join(".crack/config.toml")]

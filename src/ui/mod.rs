@@ -9,6 +9,7 @@ mod memory;
 mod picker;
 mod providers;
 pub mod render;
+mod settings;
 mod theme;
 mod undo;
 mod view;
@@ -34,6 +35,7 @@ actions!(
         Undo,
         Redo,
         ShowDiff,
+        OpenSettings,
         ToggleSidebar,
         CycleAgent,
         CycleEffort,
@@ -102,6 +104,7 @@ fn bind_keys(cx: &mut App) {
     let prompt = Some("Prompt");
     cx.bind_keys([
         KeyBinding::new("ctrl-p", CommandPalette, ws),
+        KeyBinding::new("ctrl-,", OpenSettings, ws),
         KeyBinding::new("ctrl-x u", Undo, ws),
         KeyBinding::new("ctrl-x r", Redo, ws),
         KeyBinding::new("ctrl-x d", ShowDiff, ws),

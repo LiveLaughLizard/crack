@@ -17,6 +17,12 @@ pub struct State {
     pub sandbox: Option<bool>,
     /// Let sandboxed commands use the network; `None` means the default (yes).
     pub sandbox_network: Option<bool>,
+    /// Chosen in Settings: "dark" or "light".
+    #[serde(default)]
+    pub theme: Option<String>,
+    /// Chosen in Settings: the interface font.
+    #[serde(default)]
+    pub font: Option<String>,
 }
 
 /// The state as last loaded or saved by this process. Saves go through the store's

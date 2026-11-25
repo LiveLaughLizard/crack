@@ -44,6 +44,8 @@ pub enum PickerKind {
     Memory,
     MemoryAction,
     Recover,
+    Settings,
+    SettingsValue,
 }
 
 pub enum PickerEvent {

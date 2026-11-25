@@ -303,6 +303,17 @@ the exact command and runs it only after you confirm. Set `lsp = false` to turn 
 servers off, or `lsp_wait_ms` to change how long crack waits for diagnostics after an edit
 (3000 by default). Each server's log is `lsp-<name>.log` in the data folder.
 
+## Settings
+
+`/settings` (or ctrl-,) changes:
+- **appearance:** theme (dark or light) and font;
+- **agent:** reasoning effort and mode;
+- **permissions:** file edits, shell commands not on the safe list, web fetches, the
+  sandbox and its network.
+
+Changes apply at once. Theme and font are remembered; permission choices are saved to
+your own `~/.config/crack/config.toml`.
+
 ## Mentions
 
 **Images.** Paste a screenshot (ctrl-v) or drop image files on the window to attach them to

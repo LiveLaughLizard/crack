@@ -96,6 +96,11 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
         &["memories"],
     ),
     (
+        "settings",
+        "Settings: theme, font, effort, mode and permissions",
+        &["preferences", "config"],
+    ),
+    (
         "usage",
         "Usage: tokens and cost by model and day",
         &["cost"],
@@ -185,6 +190,8 @@ pub struct CrackView {
     pub(super) interrupted: Vec<(String, String)>,
     /// Project files for `@` suggestions, and when they were listed.
     file_cache: Option<(Instant, std::sync::Arc<Vec<String>>)>,
+    /// The setting whose choices are open.
+    pub(super) settings_target: Option<String>,
     /// Images to send with the next message.
     pub(super) attachments: Vec<super::attach::Attachment>,
     recent_models: Vec<String>,
@@ -281,6 +288,7 @@ impl CrackView {
             interrupted: Vec::new(),
             file_cache: None,
             attachments: Vec::new(),
+            settings_target: None,
             recent_models,
             discovering: false,
             window_title: String::new(),
@@ -816,6 +824,7 @@ impl CrackView {
             Some("redo") => self.redo(cx),
             Some("diff") => self.show_session_diff(cx),
             Some("memory") => self.open_picker(PickerKind::Memory, window, cx),
+            Some("settings") => self.open_picker(PickerKind::Settings, window, cx),
             Some("usage") => {
                 let project = crate::memory::project_key(&self.ws.cwd);
                 let report = crate::usage::report(30, Some(&project));
@@ -1176,6 +1185,8 @@ impl CrackView {
                 self.recover_items(),
                 true,
             ),
+            PickerKind::Settings => ("Settings", self.settings_items(), true),
+            PickerKind::SettingsValue => ("Settings", self.settings_value_items(cx), true),
         };
         let search = (kind == PickerKind::Session).then(|| {
             let root = context::project_root(&self.ws.cwd);
@@ -1271,6 +1282,8 @@ impl CrackView {
             PickerKind::Memory => self.open_memory(&id, window, cx),
             PickerKind::MemoryAction => self.memory_action(&id, window, cx),
             PickerKind::Recover => self.recover(&id, window, cx),
+            PickerKind::Settings => self.open_setting(&id, window, cx),
+            PickerKind::SettingsValue => self.apply_setting(&id, window, cx),
             PickerKind::Install => {
                 if id == "install" {
                     self.run_install(cx);
@@ -1496,6 +1509,7 @@ impl CrackView {
             ("undo", "ctrl-x u"),
             ("redo", "ctrl-x r"),
             ("diff", "ctrl-x d"),
+            ("settings", "ctrl-,"),
             ("help", "ctrl-x h"),
             ("exit", "ctrl-x q"),
         ]
@@ -1503,6 +1517,7 @@ impl CrackView {
         .collect();
         let group = |name: &str| match name {
             "new" | "sessions" | "rename" | "copy" | "tab" | "close" => "Session",
+            "settings" => "System",
             "models" | "effort" | "agents" | "connect" => "Agent",
             "skills" | "init" | "reload" | "cd" | "compact" | "undo" | "redo" | "diff"
             | "trust-hooks" | "commit" | "memory" | "remember" | "export-memory" | "usage" => {

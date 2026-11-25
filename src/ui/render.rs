@@ -1410,6 +1410,9 @@ impl Render for CrackView {
             .on_action(cx.listener(|this, _: &Undo, window, cx| this.undo(window, cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
             .on_action(cx.listener(|this, _: &ShowDiff, _, cx| this.show_session_diff(cx)))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_picker(PickerKind::Settings, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &CopyLast, _, cx| this.copy_last(cx)))
             .on_action(cx.listener(|this, _: &PageUp, _, cx| this.scroll_by(1., cx)))
             .on_action(cx.listener(|this, _: &PageDown, _, cx| this.scroll_by(-1., cx)))
