@@ -442,6 +442,10 @@ fn starts_with_words(command: &str, prefix: &str) -> bool {
 /// The rule offered by "allow for this session": the command's program and
 /// subcommand (`cargo test *`), a folder, or an MCP server.
 pub fn suggest_rule(tool: &str, input: &Value, root: &Path, cwd: &Path) -> String {
+    // Commits always ask, so there's no rule to offer.
+    if tool == "git_commit" {
+        return String::new();
+    }
     if let Some(server) = tool
         .strip_prefix("mcp__")
         .and_then(|rest| rest.split("__").next())
@@ -625,6 +629,10 @@ impl Policy {
         // Shell commands are judged part by part, so `echo ok && rm -rf ~` isn't `echo`.
         if let Subject::Command(command) = &call.subject {
             return self.check_command(&call, command);
+        }
+        // Commits are never automatic, not even in YOLO mode.
+        if tool == "git_commit" {
+            return Decision::Ask("commits always ask first".into());
         }
         if let Some(rule) = self.ask.iter().find(|r| r.matches(&call)) {
             return Decision::Ask(format!("the rule `{}` asks first", rule.text));

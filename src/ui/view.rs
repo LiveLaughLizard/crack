@@ -86,6 +86,11 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
         "Compact the conversation: summarize it to free context",
         &["summarize"],
     ),
+    (
+        "commit",
+        "Commit: the model drafts a message from the diff, you approve",
+        &[],
+    ),
     ("undo", "Undo the last turn: conversation and files", &[]),
     ("redo", "Redo what undo took back", &[]),
     (
@@ -150,6 +155,8 @@ pub struct CrackView {
     pub(super) diff_view: Option<super::undo::DiffView>,
     /// Told the user about untrusted project hooks this run.
     pub(super) hooks_warned: bool,
+    /// The repository's branch and changes, for the sidebar.
+    pub(super) git: Option<crate::git::Status>,
     recent_models: Vec<String>,
     pub(super) discovering: bool,
     /// The window title last set; updated when the session or directory changes.
@@ -238,6 +245,7 @@ impl CrackView {
             redo: None,
             diff_view: None,
             hooks_warned: false,
+            git: None,
             recent_models,
             discovering: false,
             window_title: String::new(),
@@ -250,6 +258,7 @@ impl CrackView {
             _subscription: subscription,
         };
         view.discover_models(cx);
+        view.refresh_git(cx);
         view.connect_mcp(None, cx);
         if plain_launch {
             view.restore_tabs(cx);
@@ -262,6 +271,38 @@ impl CrackView {
 
     pub fn focus_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.input.focus_handle(cx));
+    }
+
+    /// Reads the branch and changed files for the sidebar, in the background.
+    pub(super) fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.ws.cwd.clone();
+        if !cwd.ancestors().any(|d| d.join(".git").exists()) {
+            return;
+        }
+        let sandbox = crate::policy::Sandbox::resolve(&self.ws.config.permissions);
+        let task = crate::runtime::spawn(async move {
+            let sandbox = sandbox.active().then_some(sandbox);
+            crate::git::run_in(
+                &cwd,
+                sandbox.as_ref(),
+                &[
+                    "status",
+                    "--porcelain=v2",
+                    "--branch",
+                    "--untracked-files=all",
+                ],
+            )
+            .await
+            .map(|text| crate::git::Status::parse(&text))
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(status)) = task.await else { return };
+            let _ = this.update(cx, |view, cx| {
+                view.git = Some(status);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Asks OpenAI-compatible and local servers for their models in the background.
@@ -547,6 +588,13 @@ impl CrackView {
             Some("sandbox") => self.toggle_sandbox(false, cx),
             Some("sandbox-network") => self.toggle_sandbox(true, cx),
             Some("compact") => self.compact_now(cx),
+            Some("commit") => {
+                if self.running.is_some() {
+                    self.show_toast("Wait for the reply to finish first.", true, cx);
+                } else {
+                    self.start_turn("/commit".into(), cx);
+                }
+            }
             Some("undo") => self.undo(window, cx),
             Some("redo") => self.redo(cx),
             Some("diff") => self.show_session_diff(cx),
@@ -743,6 +791,7 @@ impl CrackView {
         }
         if let AgentEvent::Done { .. } = event {
             self.running = None;
+            self.refresh_git(cx);
             self.esc_armed = None;
             self.session.todos = self.todos.lock().unwrap().clone();
             if let Err(error) = self.session.save() {
@@ -1572,6 +1621,7 @@ impl CrackView {
             } else {
                 self.show_toast(format!("Finished in another tab: {title}"), false, cx);
             }
+            self.refresh_git(cx);
         }
         cx.notify();
     }
@@ -1827,6 +1877,13 @@ impl CrackView {
     ) {
         let Some(request) = self.approvals.remove(&self.tab_id) else {
             return;
+        };
+        // Without a rule to offer (commits), every yes is a yes for this time only.
+        let choice = match choice {
+            ApprovalChoice::Session | ApprovalChoice::Always if request.suggestion.is_empty() => {
+                ApprovalChoice::Once
+            }
+            other => other,
         };
         let answer = match choice {
             ApprovalChoice::Once => crate::policy::Answer::Once,

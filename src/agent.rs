@@ -483,6 +483,11 @@ async fn permit(
         ))),
         Decision::Ask(reason) => {
             let Some(approvals) = &config.approvals else {
+                if name == "git_commit" {
+                    return Err(refuse(
+                        "Commits need a person's approval, and this headless run can't ask. Leave the changes uncommitted and tell the user.".into(),
+                    ));
+                }
                 return Err(refuse(format!(
                     "This needs a person's approval ({reason}), and this headless run can't ask. \
                      Work without it, or tell the user which permission rule to add \

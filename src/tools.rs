@@ -104,7 +104,7 @@ impl ToolOutput {
         Self::error(content, title)
     }
 
-    fn ok(content: impl Into<String>, meta: ToolMeta) -> Self {
+    pub fn ok(content: impl Into<String>, meta: ToolMeta) -> Self {
         Self {
             content: content.into(),
             is_error: false,
@@ -132,7 +132,7 @@ fn spec(name: &str, description: &str, schema: Value) -> ToolSpec {
     }
 }
 
-const READ_ONLY: [&str; 7] = [
+const READ_ONLY: &[&str] = &[
     "read",
     "glob",
     "grep",
@@ -140,6 +140,10 @@ const READ_ONLY: [&str; 7] = [
     "webfetch",
     "todowrite",
     "skill",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
 ];
 
 pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
@@ -266,6 +270,9 @@ pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
             }),
         ),
     ];
+    if ctx.cwd.ancestors().any(|d| d.join(".git").exists()) {
+        all.extend(crate::git::specs());
+    }
     if !ctx.skills.is_empty() {
         let mut listing = String::from(
             "Load a skill: specialized instructions and resources for a task. Call it when the task matches a skill's \
@@ -343,6 +350,11 @@ pub fn title(name: &str, input: &Value) -> String {
         "read" => format!("Read {}", arg("path")),
         "write" => format!("Write {}", arg("path")),
         "edit" => format!("Edit {}", arg("path")),
+        "git_status" => "git status".into(),
+        "git_diff" => format!("git diff {}", arg("path")).trim_end().to_owned(),
+        "git_log" => format!("git log {}", arg("path")).trim_end().to_owned(),
+        "git_show" => format!("git show {}", arg("ref")).trim_end().to_owned(),
+        "git_commit" => format!("Commit: {}", arg("message")),
         "glob" => format!("Glob \"{}\"", arg("pattern")),
         "grep" => format!("Grep \"{}\"", arg("pattern")),
         "list" => format!(
@@ -404,6 +416,7 @@ pub async fn run(name: &str, input: &Value, ctx: &ToolContext, agent: Agent) -> 
         "list" => list(input, ctx).await,
         #[cfg(feature = "cloud")]
         "webfetch" => webfetch(input, ctx).await,
+        git if git.starts_with("git_") => crate::git::tool(git, input, ctx).await,
         "todowrite" => todowrite(input, ctx),
         "skill" => skill(input, ctx).await,
         mcp if mcp.starts_with("mcp__") => {

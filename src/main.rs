@@ -7,6 +7,7 @@ mod agent;
 mod checkpoint;
 mod config;
 mod context;
+mod git;
 mod headless;
 mod hooks;
 mod mcp;

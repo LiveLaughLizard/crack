@@ -164,6 +164,14 @@ impl Workspace {
     pub fn expand_skill(&self, input: &str) -> Option<(String, String)> {
         let rest = input.strip_prefix('/')?;
         let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        // Built-in: `/commit [hint]` drafts a commit for the user to approve.
+        if name == "commit" && self.skill("commit").is_none() {
+            let hint = match args.trim() {
+                "" => String::new(),
+                hint => format!("\n\nThe user added: {hint}"),
+            };
+            return Some((format!("{COMMIT_PROMPT}{hint}"), "commit".to_owned()));
+        }
         let skill = self.skill(name)?;
         let body = skill.load().ok()?;
         let request = if args.trim().is_empty() {
@@ -188,3 +196,13 @@ impl Workspace {
         shown.trim_end_matches('/').to_owned()
     }
 }
+
+const COMMIT_PROMPT: &str = "\
+Commit the current changes to git.
+1. Look at them with git_status, then git_diff (staged: true if anything is staged; otherwise the unstaged diff).
+2. Check git_log for this repository's message style, and match it.
+3. Call git_commit once with a clear message: a short subject (under 72 characters, imperative mood), \
+then a blank line and a body explaining what changed and why, if that isn't obvious. \
+If nothing is staged, set `all: true` to commit the modified tracked files. If there are new untracked files \
+that clearly belong in the commit, say so instead of committing, since git_commit doesn't add new files.
+Don't change any files. The user approves the commit before it happens; if they deny it, ask what they'd like changed.";

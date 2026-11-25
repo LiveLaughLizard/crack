@@ -1127,6 +1127,41 @@ impl CrackView {
             #[cfg(feature = "yolo")]
             crate::policy::Mode::Yolo => theme::error(),
         };
+        if let Some(git) = &self.git {
+            let mut line = div().flex().flex_row().gap(px(6.)).child(
+                div()
+                    .text_color(theme::text_soft())
+                    .child(git.branch.clone()),
+            );
+            if git.ahead > 0 {
+                line = line.child(
+                    div()
+                        .text_color(theme::success())
+                        .child(format!("\u{2191}{}", git.ahead)),
+                );
+            }
+            if git.behind > 0 {
+                line = line.child(
+                    div()
+                        .text_color(theme::warning())
+                        .child(format!("\u{2193}{}", git.behind)),
+                );
+            }
+            let changed = git.changed();
+            line = line.child(if changed == 0 {
+                "clean".to_owned()
+            } else {
+                format!("{changed} changed")
+            });
+            column = column.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .text_color(theme::muted())
+                    .child(section("Git"))
+                    .child(line),
+            );
+        }
         column = column.child(
             div()
                 .flex()
@@ -1766,34 +1801,35 @@ impl CrackView {
                                 }),
                             ),
                         )
-                        .child(
-                            button(
-                                "approve-session",
-                                "a",
-                                format!("Allow `{rule}` this session"),
-                                false,
+                        .when(!rule.is_empty(), |row| {
+                            row.child(
+                                button(
+                                    "approve-session",
+                                    "a",
+                                    format!("Allow `{rule}` this session"),
+                                    false,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.answer_approval(
+                                            super::view::ApprovalChoice::Session,
+                                            window,
+                                            cx,
+                                        )
+                                    },
+                                )),
                             )
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.answer_approval(
-                                        super::view::ApprovalChoice::Session,
-                                        window,
-                                        cx,
-                                    )
-                                },
-                            )),
-                        )
-                        .child(
-                            button("approve-always", "A", "Always allow".into(), false).on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.answer_approval(
-                                        super::view::ApprovalChoice::Always,
-                                        window,
-                                        cx,
-                                    )
-                                }),
-                            ),
-                        )
+                            .child(
+                                button("approve-always", "A", "Always allow".into(), false)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.answer_approval(
+                                            super::view::ApprovalChoice::Always,
+                                            window,
+                                            cx,
+                                        )
+                                    })),
+                            )
+                        })
                         .child(
                             button("deny", "n", "Deny".into(), false).on_click(cx.listener(
                                 |this, _, window, cx| {

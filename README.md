@@ -213,6 +213,24 @@ crack leaves it alone and shows you the diff. Snapshots need `git` on PATH; set
 `checkpoints = false` to turn them off. `crack run --format json` reports a
 `files_changed` event per turn.
 
+## Git
+
+In a git repository the model gets read-only tools, offered to Plan as well, that need no
+approval:
+- `git_status`: branch, upstream, ahead/behind, staged, unstaged, untracked and
+  conflicted files;
+- `git_diff`: unstaged, staged or against a ref, per path, or a `stat` summary;
+- `git_log`: with path and ref filters;
+- `git_show`.
+
+They run in the sandbox with the repository's command-running settings switched off
+(fsmonitor, hooks, external diff), so reading an untrusted repository can't run its code.
+The sidebar shows the branch, commits ahead and behind, and the number of changed files.
+
+**`/commit`** asks the model to read the diff and the repository's log, then draft a
+message in the same style. The commit itself always waits for you on the approval card,
+even in YOLO mode, and it never happens in headless runs.
+
 ## Hooks
 
 Hooks run your commands at points in a turn. They use Claude Code's format and contract,
