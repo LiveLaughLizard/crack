@@ -190,6 +190,16 @@ pub fn run(
             .expect("could not open the window");
         let _ = window.update(cx, |view, window, cx| view.focus_prompt(window, cx));
         cx.on_window_closed(|cx| cx.quit()).detach();
+        // However crack quits: save every tab, remember which were open, and wait
+        // for the database writes to land.
+        cx.on_app_quit(move |cx| {
+            let _ = window.update(cx, |view, _, cx| view.before_quit(cx));
+            for error in crate::store::get().flush() {
+                eprintln!("warning: could not save: {error}");
+            }
+            async {}
+        })
+        .detach();
         cx.activate(true);
     });
 }

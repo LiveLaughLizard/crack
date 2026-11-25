@@ -1,9 +1,10 @@
 //! A conversation: the model history, what the interface shows, and persistence
-//! under `~/.local/share/crack/sessions`.
+//! in the database (`store`). Saves are incremental: new model messages are appended,
+//! and transcript entries are rewritten only from the first one that changed.
 
 use crate::agent::AgentEvent;
-use crate::config;
 use crate::providers::{Message, Usage};
+use crate::store;
 use crate::tools::{Agent, Todo, ToolMeta};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -78,6 +79,12 @@ pub struct Session {
     pub todos: Vec<Todo>,
     #[serde(default)]
     pub model: String,
+    /// How many `messages` are already in the database.
+    #[serde(skip)]
+    saved_messages: usize,
+    /// The first entry changed since the last save (`entries.len()` when clean).
+    #[serde(skip)]
+    dirty_from: usize,
 }
 
 fn now() -> i64 {
@@ -103,7 +110,19 @@ impl Session {
             context_tokens: 0,
             todos: Vec::new(),
             model: String::new(),
+            saved_messages: 0,
+            dirty_from: 0,
         }
+    }
+
+    /// Marks entry `index` (and everything after it) as needing a save.
+    fn touch(&mut self, index: usize) {
+        self.dirty_from = self.dirty_from.min(index);
+    }
+
+    fn touch_last(&mut self) {
+        let last = self.entries.len().saturating_sub(1);
+        self.touch(last);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -147,6 +166,9 @@ impl Session {
     }
 
     pub fn apply(&mut self, event: &AgentEvent, agent: Agent, model: &str) {
+        // Every event appends an entry or changes the last one; older entries are
+        // touched explicitly below (tool results, interrupted calls).
+        self.touch_last();
         match event {
             AgentEvent::Text(piece) => {
                 self.close_thinking();
@@ -241,11 +263,12 @@ impl Session {
             } => {
                 self.close_thinking();
                 // Calls that never ran (interrupted) are marked as failed.
-                for entry in &mut self.entries {
+                for (index, entry) in self.entries.iter_mut().enumerate() {
                     if let Entry::Tool { state, .. } = entry
                         && matches!(state, ToolState::Pending | ToolState::Running)
                     {
                         *state = ToolState::Error;
+                        self.dirty_from = self.dirty_from.min(index);
                     }
                 }
                 self.entries.push(Entry::Footer {
@@ -261,56 +284,109 @@ impl Session {
     }
 
     fn tool_entry(&mut self, tool_id: &str) -> Option<&mut Entry> {
-        self.entries
-            .iter_mut()
-            .rev()
-            .find(|e| matches!(e, Entry::Tool { id, .. } if id == tool_id))
+        let index = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, Entry::Tool { id, .. } if id == tool_id))?;
+        self.touch(index);
+        self.entries.get_mut(index)
     }
 
-    fn dir() -> PathBuf {
-        config::data_dir().join("sessions")
-    }
-
-    pub fn save(&self) -> anyhow::Result<()> {
-        if self.messages.is_empty() {
-            return Ok(());
-        }
-        let dir = Self::dir();
-        std::fs::create_dir_all(&dir)?;
-        let tmp = dir.join(format!("{}.json.tmp", self.id));
-        std::fs::write(&tmp, serde_json::to_vec(self)?)?;
-        std::fs::rename(tmp, dir.join(format!("{}.json", self.id)))?;
+    /// Saves what changed since the last save, in the background.
+    pub fn save(&mut self) -> anyhow::Result<()> {
+        self.save_to(store::get());
         Ok(())
     }
 
+    pub(crate) fn save_to(&mut self, store: &store::Store) {
+        if self.messages.is_empty() && self.entries.is_empty() {
+            return;
+        }
+        let messages_from = self.saved_messages.min(self.messages.len());
+        let new_messages = &self.messages[messages_from..];
+        let entries_from = self.dirty_from.min(self.entries.len());
+        // Search text changes only when the model history does.
+        let search_body = (!new_messages.is_empty() || messages_from == 0).then(|| {
+            self.messages
+                .iter()
+                .map(|m| m.text())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        store.save_session(store::SessionWrite {
+            id: self.id.clone(),
+            project: crate::context::project_root(&self.cwd)
+                .display()
+                .to_string(),
+            cwd: self.cwd.display().to_string(),
+            title: self.title.clone(),
+            model: self.model.clone(),
+            created: self.created,
+            updated: self.updated,
+            usage: to_json(&self.usage),
+            context_tokens: self.context_tokens as i64,
+            todos: to_json(&self.todos),
+            messages_from,
+            messages: new_messages.iter().map(to_json).collect(),
+            entries_from,
+            entries: self.entries[entries_from..].iter().map(to_json).collect(),
+            search_body,
+        });
+        self.saved_messages = self.messages.len();
+        self.dirty_from = self.entries.len();
+    }
+
     pub fn load(id: &str) -> anyhow::Result<Session> {
-        let text = std::fs::read(Self::dir().join(format!("{id}.json")))?;
-        Ok(serde_json::from_slice(&text)?)
+        Self::load_from(store::get(), id)
+    }
+
+    pub(crate) fn load_from(store: &store::Store, id: &str) -> anyhow::Result<Session> {
+        let row = store.load_session(id)?;
+        let parse = |what: &str, text: &str| -> anyhow::Result<serde_json::Value> {
+            serde_json::from_str(text).map_err(|e| anyhow::anyhow!("session {id}: bad {what}: {e}"))
+        };
+        let messages: Vec<Message> = row
+            .messages
+            .iter()
+            .map(|m| Ok(serde_json::from_value(parse("message", m)?)?))
+            .collect::<anyhow::Result<_>>()?;
+        let entries: Vec<Entry> = row
+            .entries
+            .iter()
+            .map(|e| Ok(serde_json::from_value(parse("entry", e)?)?))
+            .collect::<anyhow::Result<_>>()?;
+        Ok(Session {
+            id: row.id,
+            title: row.title,
+            cwd: row.cwd,
+            created: row.created,
+            updated: row.updated,
+            saved_messages: messages.len(),
+            dirty_from: entries.len(),
+            messages,
+            entries,
+            usage: serde_json::from_str(&row.usage).unwrap_or_default(),
+            context_tokens: row.context_tokens.max(0) as u64,
+            todos: serde_json::from_str(&row.todos).unwrap_or_default(),
+            model: row.model,
+        })
     }
 
     /// Sessions started in `project` (or below it), newest first.
     pub fn list(project: &Path) -> Vec<SessionSummary> {
-        let Ok(entries) = std::fs::read_dir(Self::dir()) else {
-            return Vec::new();
-        };
-        let mut out: Vec<SessionSummary> = entries
-            .flatten()
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .filter_map(|e| {
-                let bytes = std::fs::read(e.path()).ok()?;
-                let summary: SessionSummary = serde_json::from_slice(&bytes).ok()?;
-                summary.cwd.starts_with(project).then_some(summary)
-            })
-            .collect();
-        out.sort_by_key(|s| std::cmp::Reverse(s.updated));
-        out
+        store::get().list_sessions(project, None)
+    }
+
+    /// Sessions in `project` whose title or conversation matches `query`, best first.
+    pub fn search(project: &Path, query: &str) -> Vec<SessionSummary> {
+        store::get().list_sessions(project, Some(query))
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct SessionSummary {
-    pub id: String,
-    pub title: String,
-    pub cwd: PathBuf,
-    pub updated: i64,
+pub use store::SessionSummary;
+
+/// A part of the session as JSON text.
+fn to_json<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "null".into())
 }

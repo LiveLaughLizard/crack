@@ -8,10 +8,13 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window, actions, div, px,
 };
 
-actions!(picker, [Dismiss]);
+actions!(picker, [Dismiss, DeleteItem]);
 
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("escape", Dismiss, Some("Picker"))]);
+    cx.bind_keys([
+        KeyBinding::new("escape", Dismiss, Some("Picker")),
+        KeyBinding::new("ctrl-d", DeleteItem, Some("Picker")),
+    ]);
 }
 
 #[derive(Clone, Debug, Default)]
@@ -39,11 +42,22 @@ pub enum PickerKind {
 }
 
 pub enum PickerEvent {
+    /// Delete this item (sessions only); sent after a second ctrl-d.
+    Delete(String),
     Confirm(PickerKind, String),
     Dismiss,
 }
 
+/// Turns a query into picker rows.
+type SearchFn = Box<dyn Fn(&str) -> Vec<PickerItem>>;
+
 pub struct Picker {
+    /// Search that replaces fuzzy matching while there is a query (e.g. full-text
+    /// search over sessions). The items given at creation show when it's empty.
+    search_fn: Option<SearchFn>,
+    all_items: Vec<PickerItem>,
+    /// The item armed by a first ctrl-d.
+    armed_delete: Option<String>,
     pub kind: PickerKind,
     title: SharedString,
     items: Vec<PickerItem>,
@@ -111,6 +125,9 @@ impl Picker {
             search,
             scroll: ScrollHandle::new(),
             wide,
+            search_fn: None,
+            all_items: Vec::new(),
+            armed_delete: None,
             _subscription: subscription,
         };
         picker.selected = picker
@@ -125,6 +142,22 @@ impl Picker {
 
     fn refilter(&mut self, cx: &mut Context<Self>) {
         let query = self.search.read(cx).text().trim().to_lowercase();
+        self.armed_delete = None;
+        if let Some(search) = &self.search_fn {
+            self.items = if query.is_empty() {
+                self.all_items.clone()
+            } else {
+                search(&query)
+            };
+            if !query.is_empty() {
+                // The search already ranked these.
+                self.filtered = (0..self.items.len()).collect();
+                self.selected = 0;
+                self.scroll.scroll_to_item(0);
+                cx.notify();
+                return;
+            }
+        }
         let mut scored: Vec<(i32, usize)> = self
             .items
             .iter()
@@ -234,6 +267,7 @@ impl Render for Picker {
                 );
             }
             let selected = n == self.selected;
+            let armed = self.armed_delete.as_deref() == Some(item.id.as_str());
             let mut title = item.title.clone();
             if !grouped && let Some(category) = &item.category {
                 title = format!("{title}  {category}");
@@ -247,6 +281,7 @@ impl Render for Picker {
                 .pr(px(20.))
                 .py(px(3.))
                 .when_selected(selected)
+                .when(armed, |d| d.bg(theme::ca(0xFF6B6B, 0.25)))
                 .child(
                     div()
                         .w(px(3.))
@@ -305,6 +340,7 @@ impl Render for Picker {
         div()
             .key_context("Picker")
             .on_action(cx.listener(|_, _: &Dismiss, _, cx| cx.emit(PickerEvent::Dismiss)))
+            .on_action(cx.listener(|this, _: &DeleteItem, _, cx| this.delete_selected(cx)))
             .w(px(if self.wide { 860. } else { 620. }))
             .max_w_full()
             .bg(theme::raised())
@@ -343,7 +379,14 @@ impl Render for Picker {
                     .text_color(theme::text_soft())
                     .child("↑↓ select")
                     .child("enter confirm")
-                    .child("esc close"),
+                    .child("esc close")
+                    .when(self.kind == PickerKind::Session, |d| {
+                        d.child(if self.armed_delete.is_some() {
+                            "ctrl-d again to delete"
+                        } else {
+                            "ctrl-d delete"
+                        })
+                    }),
             )
     }
 }
@@ -363,3 +406,39 @@ impl<T: Styled> WhenSelected for T {
 }
 
 use gpui::prelude::FluentBuilder as _;
+
+impl Picker {
+    /// Replaces fuzzy matching with `search` whenever there's a query.
+    pub fn with_search(mut self, search: impl Fn(&str) -> Vec<PickerItem> + 'static) -> Self {
+        self.all_items = self.items.clone();
+        self.search_fn = Some(Box::new(search));
+        self
+    }
+
+    /// Removes an item after the owner deleted what it stands for.
+    pub fn remove_item(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.items.retain(|i| i.id != id);
+        self.all_items.retain(|i| i.id != id);
+        self.armed_delete = None;
+        self.refilter(cx);
+    }
+
+    /// The first ctrl-d arms the selected item; a second one deletes it.
+    fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        if self.kind != PickerKind::Session {
+            return;
+        }
+        let Some(item) = self.filtered.get(self.selected).map(|i| &self.items[*i]) else {
+            return;
+        };
+        if item.disabled {
+            return;
+        }
+        if self.armed_delete.as_deref() == Some(item.id.as_str()) {
+            cx.emit(PickerEvent::Delete(item.id.clone()));
+        } else {
+            self.armed_delete = Some(item.id.clone());
+        }
+        cx.notify();
+    }
+}

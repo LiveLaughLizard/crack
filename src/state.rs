@@ -1,9 +1,8 @@
 //! Things the interface remembers between launches: window size and effort.
-//! Kept in `~/.local/share/crack/state.json`, apart from the user's config.
+//! (Open tabs are remembered per project; see `ui::view`.) Kept in the database (`kv` table, key `state`), apart from the user's config.
 
 use crate::providers::Effort;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -16,28 +15,27 @@ pub struct State {
     pub effort: Option<Effort>,
 }
 
-fn path() -> PathBuf {
-    crate::config::data_dir().join("state.json")
-}
+/// The state as last loaded or saved by this process. Saves go through the store's
+/// background writer, so reading back from the database could miss a recent change.
+static CACHE: std::sync::Mutex<Option<State>> = std::sync::Mutex::new(None);
 
 impl State {
     pub fn load() -> State {
-        std::fs::read(path())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        let mut cache = CACHE.lock().unwrap();
+        cache
+            .get_or_insert_with(|| {
+                crate::store::get()
+                    .kv("state")
+                    .and_then(|text| serde_json::from_str(&text).ok())
+                    .unwrap_or_default()
+            })
+            .clone()
     }
 
     pub fn save(&self) {
-        let path = path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let tmp = path.with_extension("json.tmp");
-        if let Ok(bytes) = serde_json::to_vec_pretty(self)
-            && std::fs::write(&tmp, bytes).is_ok()
-        {
-            let _ = std::fs::rename(tmp, path);
+        *CACHE.lock().unwrap() = Some(self.clone());
+        if let Ok(text) = serde_json::to_string_pretty(self) {
+            crate::store::get().set_kv("state", text);
         }
     }
 

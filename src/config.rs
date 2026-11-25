@@ -181,8 +181,11 @@ pub fn global_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("crack"))
 }
 
-/// `~/.local/share/crack` (sessions).
+/// `~/.local/share/crack` (the database, logs), or `$CRACK_DATA_DIR`.
 pub fn data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CRACK_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("crack")

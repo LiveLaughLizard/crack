@@ -233,6 +233,9 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
         if let Err(error) = session.save() {
             eprintln!("warning: could not save the session: {error}");
         }
+        for error in crate::store::get().flush() {
+            eprintln!("warning: could not save the session: {error}");
+        }
         Ok(if interrupted {
             130
         } else if failed {

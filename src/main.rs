@@ -13,6 +13,7 @@ mod runtime;
 mod session;
 mod skills;
 mod state;
+mod store;
 mod tools;
 mod ui;
 mod workspace;

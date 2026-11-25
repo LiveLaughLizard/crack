@@ -129,6 +129,8 @@ impl CrackView {
         let input = cx.new(|cx| TextInput::new(true, format!("Ask anything… \"{pick}\""), cx));
         let subscription = cx.subscribe_in(&input, window, Self::on_input_event);
 
+        // A plain launch reopens last time's tabs; -s or a prompt starts fresh.
+        let plain_launch = session_id.is_none() && prompt.is_none();
         let mut session = Session::new(&ws.cwd);
         let mut toast = None;
         if let Some(id) = session_id {
@@ -191,6 +193,9 @@ impl CrackView {
         };
         view.discover_models(cx);
         view.connect_mcp(None, cx);
+        if plain_launch {
+            view.restore_tabs(cx);
+        }
         if let Some(prompt) = prompt {
             view.submit_text(prompt, window, cx);
         }
@@ -589,6 +594,8 @@ impl CrackView {
                     for event in batch {
                         view.on_agent_event(tab, event, agent, &model, cx);
                     }
+                    // Saved as it streams, so a crash loses at most this batch.
+                    view.save_tab(tab);
                     cx.notify();
                 });
                 if alive.is_err() {
@@ -746,7 +753,19 @@ impl CrackView {
             PickerKind::Help => ("Keybindings", help_items(), false),
             PickerKind::Mcp => ("MCP servers", self.mcp_items(), true),
         };
-        let picker = cx.new(|cx| Picker::new(kind, title, items, wide, window, cx));
+        let search = (kind == PickerKind::Session).then(|| {
+            let root = context::project_root(&self.ws.cwd);
+            let current = self.session.id.clone();
+            move |query: &str| session_picker_items(Session::search(&root, query), &current, &root)
+        });
+        let picker = cx.new(|cx| {
+            let picker = Picker::new(kind, title, items, wide, window, cx);
+            match search {
+                // Typing searches the conversations themselves, not just titles.
+                Some(search) => picker.with_search(search),
+                None => picker,
+            }
+        });
         let subscription = cx.subscribe_in(&picker, window, Self::on_picker_event);
         self.picker = Some((picker, subscription));
         cx.notify();
@@ -768,6 +787,10 @@ impl CrackView {
         let (kind, id) = match event {
             PickerEvent::Dismiss => {
                 self.close_picker(window, cx);
+                return;
+            }
+            PickerEvent::Delete(id) => {
+                self.delete_session(id, window, cx);
                 return;
             }
             PickerEvent::Confirm(kind, id) => (*kind, id.clone()),
@@ -995,28 +1018,11 @@ impl CrackView {
     }
 
     fn session_items(&self) -> Vec<PickerItem> {
-        let today = chrono::Local::now().date_naive();
-        Session::list(&context::project_root(&self.ws.cwd))
-            .into_iter()
-            .map(|s| {
-                let when = chrono::DateTime::from_timestamp(s.updated, 0)
-                    .map(|d| d.with_timezone(&chrono::Local))
-                    .unwrap_or_else(chrono::Local::now);
-                let category = if when.date_naive() == today {
-                    "Today".to_owned()
-                } else {
-                    when.format("%a %b %d %Y").to_string()
-                };
-                PickerItem {
-                    current: s.id == self.session.id,
-                    id: s.id,
-                    title: s.title,
-                    footer: Some(when.format("%H:%M").to_string()),
-                    category: Some(category),
-                    ..Default::default()
-                }
-            })
-            .collect()
+        session_picker_items(
+            Session::list(&context::project_root(&self.ws.cwd)),
+            &self.session.id,
+            &context::project_root(&self.ws.cwd),
+        )
     }
 
     fn skill_items(&self) -> Vec<PickerItem> {
@@ -1090,26 +1096,57 @@ fn help_items() -> Vec<PickerItem> {
         .collect()
 }
 
-fn history_path() -> std::path::PathBuf {
-    crate::config::data_dir().join("prompt-history.json")
+/// Rows for the Sessions picker: grouped by day, with the subdirectory when a session
+/// was started below the project root.
+fn session_picker_items(
+    sessions: Vec<crate::session::SessionSummary>,
+    current: &str,
+    root: &std::path::Path,
+) -> Vec<PickerItem> {
+    let today = chrono::Local::now().date_naive();
+    sessions
+        .into_iter()
+        .map(|s| {
+            let when = chrono::DateTime::from_timestamp(s.updated, 0)
+                .map(|d| d.with_timezone(&chrono::Local))
+                .unwrap_or_else(chrono::Local::now);
+            let category = if when.date_naive() == today {
+                "Today".to_owned()
+            } else {
+                when.format("%a %b %d %Y").to_string()
+            };
+            let subdir = s
+                .cwd
+                .strip_prefix(root)
+                .ok()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.display().to_string());
+            PickerItem {
+                current: s.id == current,
+                id: s.id,
+                title: s.title,
+                description: subdir,
+                footer: Some(when.format("%H:%M").to_string()),
+                category: Some(category),
+                ..Default::default()
+            }
+        })
+        .collect()
 }
 
+/// Prompt history (up / down in the prompt), the last 200, in the database.
 fn load_history() -> Vec<String> {
-    std::fs::read(history_path())
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
+    crate::store::get()
+        .kv("prompt_history")
+        .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
 }
 
 fn save_history(history: &[String]) {
     let start = history.len().saturating_sub(200);
-    if let Some(parent) = history_path().parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Ok(text) = serde_json::to_string(&history[start..]) {
+        crate::store::get().set_kv("prompt_history", text);
     }
-    let _ = std::fs::write(
-        history_path(),
-        serde_json::to_vec(&history[start..]).unwrap_or_default(),
-    );
 }
 
 impl CrackView {
@@ -1429,5 +1466,128 @@ impl CrackView {
                 (*id, title, running, *id == self.tab_id)
             })
             .collect()
+    }
+}
+
+impl CrackView {
+    /// Saves a tab's session (whatever changed since its last save).
+    pub(super) fn save_tab(&mut self, tab: u64) {
+        let session = if tab == self.tab_id {
+            Some(&mut self.session)
+        } else {
+            self.background.get_mut(&tab).map(|t| &mut t.session)
+        };
+        if let Some(session) = session {
+            let _ = session.save();
+        }
+    }
+}
+
+/// The sessions open in tabs for one project, saved when crack quits.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct OpenTabs {
+    sessions: Vec<String>,
+    active: Option<String>,
+}
+
+impl CrackView {
+    fn tabs_key(&self) -> String {
+        format!("tabs:{}", context::project_root(&self.ws.cwd).display())
+    }
+
+    /// Saves every tab and remembers which sessions were open, for next time.
+    pub(super) fn before_quit(&mut self, _cx: &mut Context<Self>) {
+        let _ = self.session.save();
+        for tab in self.background.values_mut() {
+            let _ = tab.session.save();
+        }
+        let mut open = OpenTabs::default();
+        for id in &self.tab_order {
+            let session = if *id == self.tab_id {
+                &self.session
+            } else {
+                match self.background.get(id) {
+                    Some(tab) => &tab.session,
+                    None => continue,
+                }
+            };
+            // Empty tabs aren't worth reopening.
+            if !session.is_empty() {
+                open.sessions.push(session.id.clone());
+                if *id == self.tab_id {
+                    open.active = Some(session.id.clone());
+                }
+            }
+        }
+        if let Ok(text) = serde_json::to_string(&open) {
+            crate::store::get().set_kv(&self.tabs_key(), text);
+        }
+    }
+
+    /// Reopens the tabs this project had open last time.
+    pub(super) fn restore_tabs(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = crate::store::get()
+            .kv(&self.tabs_key())
+            .and_then(|text| serde_json::from_str::<OpenTabs>(&text).ok())
+        else {
+            return;
+        };
+        let sessions: Vec<Session> = open
+            .sessions
+            .iter()
+            .filter_map(|id| Session::load(id).ok())
+            .collect();
+        if sessions.is_empty() {
+            return;
+        }
+        let active = open.active.clone();
+        self.tab_order.clear();
+        let mut active_state = None;
+        for session in sessions {
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tab_order.push(id);
+            let is_active = active.as_deref() == Some(session.id.as_str());
+            let mut tab = self.fresh_tab();
+            *tab.todos.lock().unwrap() = session.todos.clone();
+            tab.session = session;
+            if is_active && active_state.is_none() {
+                active_state = Some((id, tab));
+            } else {
+                self.background.insert(id, tab);
+            }
+        }
+        let (id, tab) = active_state.unwrap_or_else(|| {
+            let first = self.tab_order[0];
+            (first, self.background.remove(&first).expect("first tab"))
+        });
+        self.restore_active(id, tab, cx);
+    }
+}
+
+impl CrackView {
+    /// Deletes a saved session from the Sessions picker. A session open in a tab is
+    /// closed first; one with a running turn is left alone.
+    fn delete_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tab_with_session(id) {
+            let running = if tab == self.tab_id {
+                self.running.is_some()
+            } else {
+                self.background
+                    .get(&tab)
+                    .is_some_and(|t| t.running.is_some())
+            };
+            if running {
+                self.show_toast("That session is running. Stop it first.", true, cx);
+                return;
+            }
+            self.close_tab(tab, window, cx);
+        }
+        crate::store::get().delete_session(id);
+        if let Some((picker, _)) = &self.picker {
+            picker.update(cx, |picker, cx| picker.remove_item(id, cx));
+            window.focus(&picker.focus_handle(cx));
+        }
+        self.show_toast("Session deleted.", false, cx);
     }
 }
