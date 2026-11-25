@@ -150,7 +150,7 @@ appimage flavor="default":
     # The window opens these at run time rather than linking them, so name them.
     extra=()
     for lib in libxkbcommon.so.0 libxkbcommon-x11.so.0 libwayland-client.so.0 libwayland-cursor.so.0 libfontconfig.so.1 libfreetype.so.6; do
-        path=$(ldconfig -p | awk -v l="$lib" '$1 == l { print $NF; exit }')
+        path=$(ldconfig -p | awk -v l="$lib" '$1 == l && !found { print $NF; found = 1 }')
         [ -n "$path" ] && extra+=(--library "$path")
     done
     mkdir -p dist
