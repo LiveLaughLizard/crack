@@ -4,6 +4,7 @@
 //! `crack run "..."` does one turn headless for scripts and CI.
 
 mod agent;
+mod background;
 mod catalog;
 mod checkpoint;
 mod code_index;
@@ -540,6 +541,8 @@ fn main() {
         crate::recovery::reap_orphans();
     }
     let result = dispatch(mode, &cli);
+    // Background shell commands end with crack (headless runs and the window alike).
+    background::kill_all();
     // Exiting skips destructors: flush the log first.
     drop(guard);
     match result {

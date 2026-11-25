@@ -179,9 +179,33 @@ pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
                     "command": {"type": "string", "description": "The command to run."},
                     "description": {"type": "string", "description": "What the command does, in 5-10 words."},
                     "workdir": {"type": "string", "description": "Directory to run in; defaults to the working directory."},
-                    "timeout": {"type": "integer", "description": "Timeout in seconds."}
+                    "timeout": {"type": "integer", "description": "Timeout in seconds."},
+                    "run_in_background": {"type": "boolean", "description": "Start it and return at once with a shell id, for servers, watchers and long builds. Read its output with bash_output; stop it with kill_shell."}
                 },
                 "required": ["command"]
+            }),
+        ),
+        spec(
+            "bash_output",
+            "Read what a background shell (started with bash run_in_background) printed since you last read it, and whether it's still running.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "shell_id": {"type": "string", "description": "The id bash returned, e.g. bg1."},
+                    "filter": {"type": "string", "description": "Only lines matching this regex."}
+                },
+                "required": ["shell_id"]
+            }),
+        ),
+        spec(
+            "kill_shell",
+            "Stop a background shell and everything it started.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "shell_id": {"type": "string", "description": "The id bash returned."}
+                },
+                "required": ["shell_id"]
             }),
         ),
         spec(
@@ -494,6 +518,33 @@ pub async fn run(name: &str, input: &Value, ctx: &ToolContext, agent: Agent) -> 
                 other => other,
             }
         }
+        "bash_output" => {
+            let id = str_arg(input, "shell_id").unwrap_or_default();
+            crate::background::output(id, &ctx.session_id, str_arg(input, "filter")).map(|text| {
+                ToolOutput {
+                    is_error: false,
+                    meta: ToolMeta {
+                        kind: DisplayKind::Shell,
+                        title: format!("Output of {id}"),
+                        detail: Some(text.clone()),
+                        link: None,
+                    },
+                    content: text,
+                }
+            })
+        }
+        "kill_shell" => {
+            let id = str_arg(input, "shell_id").unwrap_or_default();
+            crate::background::kill(id, &ctx.session_id).map(|text| {
+                ToolOutput::ok(
+                    text,
+                    ToolMeta {
+                        title: format!("Stop {id}"),
+                        ..Default::default()
+                    },
+                )
+            })
+        }
         "read" => read(input, ctx).await,
         "glob" => glob(input, ctx).await,
         "grep" => grep(input, ctx).await,
@@ -549,7 +600,7 @@ pub async fn run(name: &str, input: &Value, ctx: &ToolContext, agent: Agent) -> 
     result.unwrap_or_else(|error| ToolOutput::error(format!("Error: {error:#}"), title))
 }
 
-fn truncate_middle(text: &str, max: usize) -> String {
+pub(crate) fn truncate_middle(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_owned();
     }
@@ -633,6 +684,18 @@ async fn bash(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         }
         _ => vec!["bash".into(), "-c".into(), command.to_owned()],
     };
+    if input.get("run_in_background").and_then(Value::as_bool) == Some(true) {
+        let id = crate::background::start(&argv, command, &workdir, &ctx.session_id, shell_path())?;
+        return Ok(ToolOutput::ok(
+            format!(
+                "Started {id} in the background. Read its output with bash_output (shell_id \"{id}\"); stop it with kill_shell."
+            ),
+            ToolMeta {
+                title: format!("$ {command} (background {id})"),
+                ..Default::default()
+            },
+        ));
+    }
     let mut child = tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
         .current_dir(&workdir)

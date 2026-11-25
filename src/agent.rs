@@ -273,6 +273,8 @@ pub(crate) async fn turn_loop(
         .unwrap_or_default();
         added.extend(crate::memory::reminder(&found));
     }
+    // Background shells: what's running and what finished since the last turn.
+    added.extend(crate::background::reminder(&ctx.session_id));
     if !added.is_empty() {
         let text = added.join("\n\n");
         if let Some(last) = history.last_mut() {

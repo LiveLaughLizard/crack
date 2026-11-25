@@ -486,6 +486,15 @@ Hooks run in parallel with a 60-second timeout. Hooks from a project's own confi
 until you trust them, by running `crack hooks trust` or from the command palette. `crack
 hooks` lists them all.
 
+## Background commands
+
+The model can start long-running commands (dev servers, watchers, long builds) with
+`run_in_background`. It reads their new output with `bash_output` (optionally filtered
+by a regex) and stops them with `kill_shell`. Before each turn it's told what's still
+running and what finished. The sidebar's Background section lists them with a stop
+button. They run in the sandbox like other commands, stop when their tab closes or
+crack exits, and are cleaned up on the next start if crack was killed.
+
 ## Built-in ripgrep
 
 The `grep` tool uses ripgrep's own search engine, so searches respect `.gitignore`,

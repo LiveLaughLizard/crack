@@ -180,6 +180,25 @@ fn plan(last_user_text: Option<&str>, tool_result: Option<&str>) -> Plan {
     }
 }
 
+/// "steps: [[\"tool\", {args}], ...]" in the first user message: one tool call per
+/// request, in order, then an answer quoting the last result.
+fn scripted_step(first_user: Option<&str>, done: usize, last: Option<&str>) -> Option<Plan> {
+    let text = first_user?;
+    let start = text.find("steps:")? + 6;
+    let json = text[start..].lines().next()?.trim();
+    let steps: Vec<(String, Value)> = serde_json::from_str(json).ok()?;
+    Some(match steps.get(done) {
+        Some((name, input)) => Plan::Call {
+            name: name.clone(),
+            input: input.clone(),
+        },
+        None => Plan::Answer(format!(
+            "Steps done. Last result:\n\n{}",
+            last.unwrap_or("")
+        )),
+    })
+}
+
 fn words(text: &str) -> Vec<String> {
     text.split_inclusive(' ').map(str::to_owned).collect()
 }
@@ -187,7 +206,14 @@ fn words(text: &str) -> Vec<String> {
 fn openai(request: &Value) -> Vec<String> {
     let messages = request["messages"].as_array().cloned().unwrap_or_default();
     let last = messages.last().cloned().unwrap_or(Value::Null);
-    let plan = if last["role"] == "tool" {
+    let done = messages.iter().filter(|m| m["role"] == "tool").count();
+    let first_user = messages
+        .iter()
+        .find(|m| m["role"] == "user")
+        .and_then(|m| m["content"].as_str());
+    let plan = if let Some(step) = scripted_step(first_user, done, last["content"].as_str()) {
+        step
+    } else if last["role"] == "tool" {
         plan(None, last["content"].as_str())
     } else {
         plan(last["content"].as_str(), None)

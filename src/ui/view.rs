@@ -1968,15 +1968,17 @@ impl CrackView {
     /// by an empty one rather than closed.
     pub(super) fn close_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if id != self.tab_id {
-            if let Some(tab) = self.background.remove(&id)
-                && let Some(running) = &tab.running
-            {
-                let _ = running.cancel.send(true);
+            if let Some(tab) = self.background.remove(&id) {
+                crate::background::kill_session(&tab.session.id);
+                if let Some(running) = &tab.running {
+                    let _ = running.cancel.send(true);
+                }
             }
             self.tab_order.retain(|t| *t != id);
             cx.notify();
             return;
         }
+        crate::background::kill_session(&self.session.id);
         if let Some(running) = &self.running {
             let _ = running.cancel.send(true);
         }

@@ -1210,6 +1210,67 @@ impl CrackView {
                     .child(line),
             );
         }
+        // Background shell commands this session started, with a stop button.
+        let shells = crate::background::list(&self.session.id);
+        if !shells.is_empty() {
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .text_color(theme::muted())
+                .child(section("Background"));
+            for (i, shell) in shells.into_iter().take(8).enumerate() {
+                let running = shell.status == crate::background::Status::Running;
+                let (state, color) = match shell.status {
+                    crate::background::Status::Running => (
+                        format!("{}s", shell.started.elapsed().as_secs()),
+                        theme::success(),
+                    ),
+                    crate::background::Status::Exited(Some(0)) => {
+                        ("done".to_owned(), theme::text_soft())
+                    }
+                    crate::background::Status::Exited(Some(code)) => {
+                        (format!("exit {code}"), theme::error())
+                    }
+                    crate::background::Status::Exited(None) => {
+                        ("ended".to_owned(), theme::text_soft())
+                    }
+                    crate::background::Status::Killed => ("stopped".to_owned(), theme::text_soft()),
+                };
+                let mut row = div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(6.))
+                    .child(div().text_color(theme::text_soft()).child(shell.id.clone()))
+                    .child(div().text_color(color).child(state))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(shell.command.clone()),
+                    );
+                if running {
+                    let id = shell.id.clone();
+                    let session = self.session.id.clone();
+                    row = row.child(
+                        div()
+                            .id(("bg-stop", i))
+                            .text_color(theme::secondary())
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(theme::text()))
+                            .child("stop")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let _ = crate::background::kill(&id, &session);
+                                this.show_toast(format!("Stopped {id}."), false, cx);
+                                cx.notify();
+                            })),
+                    );
+                }
+                list = list.child(row);
+            }
+            column = column.child(list);
+        }
+
         // Language servers this project uses: running, idle, failed, or one click to install.
         let servers = crate::lsp::relevant(&crate::context::project_root(&self.ws.cwd));
         if !servers.is_empty() && self.ws.config.lsp.unwrap_or(true) {
