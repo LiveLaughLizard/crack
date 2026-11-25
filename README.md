@@ -382,11 +382,30 @@ headers.
   and the sidebar. `/mcp` lists each server's status and error; choosing one reconnects
   it.
 - **Checking from the command line:** `crack mcp` connects every server and lists its
-  tools. It exits with 1 if any server fails, so you can use it in CI.
+  tools, resources and prompts. It exits with 1 if any server fails or needs sign-in, so
+  you can use it in CI.
 - **Headless runs:** `crack run` connects the servers before the turn. Allow their tools
   with `--tools mcp` (all of them), `--tools mcp__github` (one server) or the exact tool
   names.
-- **Remote servers:** authenticate with headers; there's no OAuth login flow.
+- **Signing in (OAuth):** a remote server that needs a login shows **needs sign-in**.
+  Press Enter on it in `/mcp`, or run `crack mcp login <server>`. Your browser opens the
+  server's sign-in page and comes back to crack on a localhost port. crack uses
+  authorization code with PKCE, and registers itself with the server automatically
+  (dynamic client registration). Tokens are kept in `~/.config/crack/credentials.toml`
+  (readable only by you) and refreshed automatically. `crack mcp logout <server>`
+  forgets them. Servers that take a static token still work with `headers`.
+- **Resources:** type `@` in the prompt to pick a server's resource (`@docs:file:///guide.md`).
+  Its contents go along with your message. The model can also read resources itself
+  with the `read_mcp_resource` tool, which Plan gets too, since reading changes nothing.
+- **Prompts:** a server's prompts are slash commands, `/server:prompt`. They're
+  suggested as you type `/` and listed in the command palette. Arguments go after the
+  command, as `name=value` or as plain text for the first one:
+  `/github:review focus=security`.
+- **Live updates:** when a server announces that its tools, resources or prompts
+  changed, crack refreshes them without reconnecting.
+
+crack uses the official Rust SDK, [rmcp](https://github.com/modelcontextprotocol/rust-sdk),
+for both transports.
 
 ## Headless and CI
 

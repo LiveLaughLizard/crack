@@ -34,6 +34,10 @@ pub(super) struct SlashItem {
     pub name: String,
     pub description: String,
     pub skill: bool,
+    /// Shown in the popup: `/name` or `@server:uri`.
+    pub label: String,
+    /// The prompt's text after choosing it.
+    pub insert: String,
 }
 
 pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
@@ -443,6 +447,8 @@ impl CrackView {
                         name: name.to_string(),
                         description: description.to_string(),
                         skill: false,
+                        label: format!("/{name}"),
+                        insert: format!("/{name} "),
                     });
                 }
             }
@@ -450,8 +456,39 @@ impl CrackView {
                 if skill.name.to_lowercase().contains(&query) {
                     self.autocomplete.push(SlashItem {
                         name: skill.name.clone(),
-                        description: skill.description.clone(),
+                        description: format!("skill \u{b7} {}", skill.description),
                         skill: true,
+                        label: format!("/{}", skill.name),
+                        insert: format!("/{} ", skill.name),
+                    });
+                }
+            }
+            for prompt in self.ws.mcp.prompts() {
+                let command = prompt.command();
+                if command.to_lowercase().contains(&query) {
+                    let args: Vec<String> = prompt
+                        .arguments
+                        .iter()
+                        .map(|(name, required)| {
+                            if *required {
+                                name.clone()
+                            } else {
+                                format!("[{name}]")
+                            }
+                        })
+                        .collect();
+                    self.autocomplete.push(SlashItem {
+                        name: command.clone(),
+                        description: format!(
+                            "MCP prompt \u{b7} {} {}",
+                            args.join(" "),
+                            prompt.description
+                        )
+                        .trim_end()
+                        .to_owned(),
+                        skill: true,
+                        label: format!("/{command}"),
+                        insert: format!("/{command} "),
                     });
                 }
             }
@@ -460,6 +497,30 @@ impl CrackView {
                 && self.autocomplete[0].name == query
                 && !self.autocomplete[0].skill
             {
+                self.autocomplete.clear();
+            }
+        } else if let Some(word) = text.rsplit(char::is_whitespace).next()
+            && let Some(query) = word.strip_prefix('@')
+        {
+            // `@server:uri` attaches an MCP resource.
+            let query = query.to_lowercase();
+            let before = &text[..text.len() - word.len()];
+            for resource in self.ws.mcp.resources() {
+                let reference = format!("{}:{}", resource.server, resource.uri);
+                if reference.to_lowercase().contains(&query)
+                    || resource.name.to_lowercase().contains(&query)
+                {
+                    self.autocomplete.push(SlashItem {
+                        name: reference.clone(),
+                        description: format!("resource \u{b7} {}", resource.name),
+                        skill: false,
+                        label: format!("@{reference}"),
+                        insert: format!("{before}@{reference} "),
+                    });
+                }
+            }
+            // A complete reference needs no popup.
+            if self.autocomplete.len() == 1 && self.autocomplete[0].name.to_lowercase() == query {
                 self.autocomplete.clear();
             }
         }
@@ -475,13 +536,13 @@ impl CrackView {
         };
         self.autocomplete.clear();
         let takes_args = item.skill || matches!(item.name.as_str(), "rename" | "cd");
-        if run && !takes_args {
+        let mention = item.label.starts_with('@');
+        if run && !takes_args && !mention {
             self.input.update(cx, |input, cx| input.set_text("", cx));
             self.submit_text(format!("/{}", item.name), window, cx);
         } else {
-            self.input.update(cx, |input, cx| {
-                input.set_text(format!("/{} ", item.name), cx)
-            });
+            self.input
+                .update(cx, |input, cx| input.set_text(item.insert.clone(), cx));
             self.autocomplete.clear();
         }
         cx.notify();
@@ -1252,8 +1313,23 @@ impl CrackView {
                 ..Default::default()
             })
             .collect();
+        // MCP prompts run as `/server:prompt`.
+        for prompt in self.ws.mcp.prompts() {
+            let command = prompt.command();
+            items.push(PickerItem {
+                title: if prompt.description.is_empty() {
+                    format!("{} prompt from {}", prompt.name, prompt.server)
+                } else {
+                    prompt.description.lines().next().unwrap_or("").to_owned()
+                },
+                description: Some(format!("/{command}")),
+                id: command,
+                category: Some("MCP".into()),
+                ..Default::default()
+            });
+        }
         items.sort_by_key(|i| {
-            ["Session", "Agent", "Safety", "Project", "System"]
+            ["Session", "Agent", "Safety", "Project", "MCP", "System"]
                 .iter()
                 .position(|g| Some(*g) == i.category.as_deref())
         });

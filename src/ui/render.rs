@@ -259,7 +259,7 @@ impl CrackView {
                                 } else {
                                     theme::text()
                                 })
-                                .child(format!("/{}", item.name)),
+                                .child(item.label.clone()),
                         )
                         .child(
                             div()
@@ -267,19 +267,14 @@ impl CrackView {
                                 .min_w_0()
                                 .truncate()
                                 .text_color(theme::muted())
-                                .child(if item.skill {
-                                    format!("skill · {}", item.description)
-                                } else {
-                                    item.description.clone()
-                                }),
+                                .child(item.description.clone()),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.ac_selected = i;
                             let item = this.autocomplete[i].clone();
                             this.autocomplete.clear();
-                            this.input.update(cx, |input, cx| {
-                                input.set_text(format!("/{} ", item.name), cx)
-                            });
+                            this.input
+                                .update(cx, |input, cx| input.set_text(item.insert.clone(), cx));
                             this.focus_prompt(window, cx);
                         })),
                 );
@@ -296,9 +291,8 @@ impl CrackView {
                     } else {
                         let item = this.autocomplete[this.ac_selected].clone();
                         this.autocomplete.clear();
-                        this.input.update(cx, |input, cx| {
-                            input.set_text(format!("/{} ", item.name), cx)
-                        });
+                        this.input
+                            .update(cx, |input, cx| input.set_text(item.insert.clone(), cx));
                         this.focus_prompt(window, cx);
                     }
                 }))

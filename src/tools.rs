@@ -347,7 +347,7 @@ pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
 /// `mcp__<server>` every tool of one server.
 fn allows(entry: &str, tool: &str) -> bool {
     entry == tool
-        || (entry == "mcp" && tool.starts_with("mcp__"))
+        || (entry == "mcp" && (tool.starts_with("mcp__") || tool == "read_mcp_resource"))
         || (entry.starts_with("mcp__") && tool.starts_with(&format!("{entry}__")))
 }
 
