@@ -120,6 +120,14 @@ fn plan(last_user_text: Option<&str>, tool_result: Option<&str>) -> Plan {
         ));
     }
     let text = last_user_text.unwrap_or_default();
+    if text.starts_with("Summarize this conversation") {
+        return Plan::Answer(
+            "## Goal\nThe user is testing crack.\n\n## Next\nAnswer the latest request.".into(),
+        );
+    }
+    if text.starts_with("This conversation was compacted") {
+        return Plan::Answer("Picking up from the summary.".into());
+    }
     // "call: <tool> <json args>" calls any tool, e.g. an MCP one.
     if let Some(i) = text.find("call:") {
         let rest = text[i + 5..].trim();

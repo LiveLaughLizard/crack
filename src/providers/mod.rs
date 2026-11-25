@@ -13,6 +13,7 @@
 
 pub mod anthropic;
 pub mod catalog;
+pub mod models;
 pub mod openai;
 pub mod registry;
 #[cfg(feature = "cloud")]

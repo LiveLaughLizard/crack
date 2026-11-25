@@ -42,7 +42,7 @@ fn spinner(id: impl Into<gpui::ElementId>, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
-fn thousands(n: u64) -> String {
+pub fn thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
@@ -52,37 +52,6 @@ fn thousands(n: u64) -> String {
         out.push(c);
     }
     out
-}
-
-/// A rough context window for the percentage shown in the sidebar.
-fn context_window(model: &str) -> Option<u64> {
-    let m = model.to_lowercase();
-    if m.contains("claude") {
-        if [
-            "haiku-4-5",
-            "claude-3",
-            "sonnet-4-5",
-            "opus-4-5",
-            "opus-4-1",
-        ]
-        .iter()
-        .any(|old| m.contains(old))
-        {
-            Some(200_000)
-        } else {
-            Some(1_000_000)
-        }
-    } else if m.contains("gemini") {
-        Some(1_000_000)
-    } else if m.contains("gpt-5") {
-        Some(400_000)
-    } else if m.contains("gpt-4.1") {
-        Some(1_000_000)
-    } else if m.contains("gpt") || m.contains("o3") || m.contains("o4") {
-        Some(128_000)
-    } else {
-        None
-    }
 }
 
 fn tool_icon(name: &str) -> &'static str {
@@ -356,7 +325,11 @@ impl CrackView {
         // The line under the prompt.
         let left: AnyElement = if !self.session.is_empty() && self.session.context_tokens > 0 {
             let tokens = self.session.context_tokens;
-            let percent = context_window(self.selection.model.as_deref().unwrap_or(""))
+            let percent = self
+                .ws
+                .registry
+                .caps(self.selection.model.as_deref().unwrap_or(""))
+                .context
                 .map(|w| format!(" ({}%)", tokens * 100 / w))
                 .unwrap_or_default();
             div()
@@ -1042,7 +1015,12 @@ impl CrackView {
             .text_color(theme::muted())
             .child(section("Context"))
             .child(format!("{} tokens", thousands(tokens)));
-        if let Some(window) = context_window(self.selection.model.as_deref().unwrap_or("")) {
+        if let Some(window) = self
+            .ws
+            .registry
+            .caps(self.selection.model.as_deref().unwrap_or(""))
+            .context
+        {
             context_section = context_section.child(format!("{}% used", tokens * 100 / window));
         }
         let usage = self.session.usage;
@@ -1052,6 +1030,14 @@ impl CrackView {
             thousands(usage.output_tokens),
             thousands(usage.cache_read_tokens)
         ));
+        if let Some(cost) = self
+            .ws
+            .registry
+            .caps(self.selection.model.as_deref().unwrap_or(""))
+            .cost(&usage)
+        {
+            context_section = context_section.child(format!("${cost:.2} spent"));
+        }
         column = column.child(context_section);
 
         let todos = self.todos.lock().unwrap().clone();

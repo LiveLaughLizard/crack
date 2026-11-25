@@ -26,6 +26,10 @@ pub struct Config {
     pub disabled_providers: Vec<String>,
     /// What runs without asking (rules, edits, sandbox).
     pub permissions: crate::policy::PermissionsConfig,
+    /// Per-model overrides: `[models."provider/model"] context = 131072, input_price = 0.5`.
+    pub models: BTreeMap<String, crate::providers::models::ModelCaps>,
+    /// Compact the conversation when it fills this share of the context window (0.8).
+    pub compact_at: Option<f64>,
     /// MCP servers, keyed by name: `command` + `args` (stdio) or `url` (HTTP).
     pub mcp: BTreeMap<String, crate::mcp::McpServerConfig>,
     /// Provider settings, keyed by provider id. Ids that match a built-in provider
@@ -165,6 +169,10 @@ impl Config {
         self.skills.extend(layer.skills);
         self.disabled_providers.extend(layer.disabled_providers);
         self.mcp.extend(layer.mcp);
+        self.models.extend(layer.models);
+        if layer.compact_at.is_some() {
+            self.compact_at = layer.compact_at;
+        }
         // Project rules add to global ones; settings override.
         let p = layer.permissions;
         self.permissions.allow.extend(p.allow);

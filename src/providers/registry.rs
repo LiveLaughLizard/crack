@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug)]
 pub struct ModelInfo {
     pub id: String,
+    /// Context window, when the server reported it.
+    pub context: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -145,6 +147,8 @@ pub async fn test_connection(
 #[derive(Clone, Debug, Default)]
 pub struct Registry {
     pub providers: Vec<ProviderInfo>,
+    /// `[models."provider/model"]` from the config.
+    pub model_overrides: BTreeMap<String, super::models::ModelCaps>,
 }
 
 fn env(names: &[&str]) -> Option<String> {
@@ -648,7 +652,10 @@ impl Registry {
                 let models: Vec<ModelInfo> = provider
                     .models
                     .iter()
-                    .map(|m| ModelInfo { id: m.clone() })
+                    .map(|m| ModelInfo {
+                        id: m.clone(),
+                        context: None,
+                    })
                     .collect();
                 // OpenAI-compatible servers list their own models unless told otherwise.
                 let discover = provider
@@ -691,7 +698,10 @@ impl Registry {
                 }
             })
             .collect();
-        Registry { providers }
+        Registry {
+            providers,
+            model_overrides: config.models.clone(),
+        }
     }
 
     /// Asks OpenAI-compatible servers for their models. Local servers that don't
@@ -706,16 +716,15 @@ impl Registry {
                 Endpoint::OpenAi(endpoint) => Some((i, endpoint.clone())),
                 _ => None,
             })
-            .map(|(i, endpoint)| async move { (i, endpoint.list_models(client).await) });
+            .map(|(i, endpoint)| async move { (i, endpoint.list_models_detailed(client).await) });
         for (index, result) in futures::future::join_all(jobs).await {
             let provider = &mut self.providers[index];
             match result {
                 Ok(models) => {
-                    let models: Vec<String> =
-                        models.into_iter().filter(|m| is_chat_model(m)).collect();
-                    for id in models {
-                        if !provider.models.iter().any(|m| m.id == id) {
-                            provider.models.push(ModelInfo { id });
+                    for (id, context) in models.into_iter().filter(|(m, _)| is_chat_model(m)) {
+                        match provider.models.iter_mut().find(|m| m.id == id) {
+                            Some(known) => known.context = known.context.or(context),
+                            None => provider.models.push(ModelInfo { id, context }),
                         }
                     }
                     if provider.local {
@@ -806,5 +815,27 @@ pub fn build_flavor() -> &'static str {
         "no Chinese providers"
     } else {
         "air-gapped: local servers only"
+    }
+}
+
+impl Registry {
+    /// What's known about `provider/model`: the config's override, then what the
+    /// server reported, then the built-in table.
+    pub fn caps(&self, model_ref: &str) -> super::models::ModelCaps {
+        let (provider, model) = model_ref.split_once('/').unwrap_or(("", model_ref));
+        let discovered = self
+            .find(provider)
+            .and_then(|p| p.models.iter().find(|m| m.id == model))
+            .and_then(|m| m.context);
+        let reported = super::models::ModelCaps {
+            context: discovered,
+            ..Default::default()
+        };
+        self.model_overrides
+            .get(model_ref)
+            .copied()
+            .unwrap_or_default()
+            .or(reported)
+            .or(super::models::builtin(model))
     }
 }

@@ -87,7 +87,13 @@ impl OpenAiEndpoint {
     }
 
     /// The models the server lists at `GET /models`.
-    pub async fn list_models(&self, client: &reqwest::Client) -> anyhow::Result<Vec<String>> {
+    /// The models the server lists at `GET /models`, with their context length when
+    /// the server says (OpenRouter, Kimi: `context_length`; Groq: `context_window`;
+    /// vLLM: `max_model_len`).
+    pub async fn list_models_detailed(
+        &self,
+        client: &reqwest::Client,
+    ) -> anyhow::Result<Vec<(String, Option<u64>)>> {
         let request = self.authorize(client.get(self.url("models"))).await?;
         let response = request
             .timeout(std::time::Duration::from_secs(8))
@@ -101,14 +107,34 @@ impl OpenAiEndpoint {
             .as_array()
             .or_else(|| json["models"].as_array())
             .context("no model list in the response")?;
-        let mut models: Vec<String> = list
+        let mut models: Vec<(String, Option<u64>)> = list
             .iter()
-            .filter_map(|m| m["id"].as_str().or_else(|| m["name"].as_str()))
-            .map(|id| id.trim_start_matches("models/").to_owned())
+            .filter_map(|m| {
+                let id = m["id"].as_str().or_else(|| m["name"].as_str())?;
+                let context = [
+                    "context_length",
+                    "context_window",
+                    "max_model_len",
+                    "max_context_length",
+                    "inputTokenLimit",
+                ]
+                .iter()
+                .find_map(|k| m[*k].as_u64());
+                Some((id.trim_start_matches("models/").to_owned(), context))
+            })
             .collect();
         models.sort();
-        models.dedup();
+        models.dedup_by(|a, b| a.0 == b.0);
         Ok(models)
+    }
+
+    pub async fn list_models(&self, client: &reqwest::Client) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .list_models_detailed(client)
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect())
     }
 
     fn body(&self, request: &ChatRequest<'_>) -> Value {

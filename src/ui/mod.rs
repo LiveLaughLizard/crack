@@ -6,7 +6,7 @@ mod input;
 mod markdown;
 mod picker;
 mod providers;
-mod render;
+pub mod render;
 mod theme;
 mod view;
 

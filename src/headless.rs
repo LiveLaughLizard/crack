@@ -115,6 +115,7 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
             None => (options.prompt.clone(), options.prompt.clone(), None),
         };
         session.push_user(&shown, model_text, selection.agent, skill);
+        config.context_tokens = session.context_tokens;
 
         let todos: Arc<Mutex<Vec<Todo>>> = Arc::new(Mutex::new(session.todos.clone()));
         let tools = workspace.tool_context(todos.clone(), options.tools.clone());
@@ -169,6 +170,9 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
                         }),
                         AgentEvent::Usage(u) => json!({"type": "usage", "usage": u}),
                         AgentEvent::Notice(t) => json!({"type": "notice", "text": t}),
+                        AgentEvent::Compacted { before, .. } => {
+                            json!({"type": "compacted", "tokens_before": before, "tokens_after": session.context_tokens})
+                        }
                         AgentEvent::Error(t) => {
                             failed = true;
                             json!({"type": "error", "text": t})

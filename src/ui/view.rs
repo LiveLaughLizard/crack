@@ -81,6 +81,11 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
         "Sandbox: allow / block network access",
         &[],
     ),
+    (
+        "compact",
+        "Compact the conversation: summarize it to free context",
+        &["summarize"],
+    ),
     ("close", "Close this tab", &["closetab"]),
     ("help", "Keybindings", &[]),
     ("exit", "Quit", &["quit", "q"]),
@@ -519,6 +524,7 @@ impl CrackView {
             Some("normal") => self.set_mode(crate::policy::Mode::Normal, cx),
             Some("sandbox") => self.toggle_sandbox(false, cx),
             Some("sandbox-network") => self.toggle_sandbox(true, cx),
+            Some("compact") => self.compact_now(cx),
             Some("close") => {
                 let id = self.tab_id;
                 self.close_tab(id, window, cx)
@@ -585,7 +591,10 @@ impl CrackView {
     fn start_turn(&mut self, text: String, cx: &mut Context<Self>) {
         // The model may have been picked before discovery finished.
         let config = match self.ws.turn_config(&self.selection) {
-            Ok(config) => config,
+            Ok(mut config) => {
+                config.context_tokens = self.session.context_tokens;
+                config
+            }
             Err(error) => {
                 self.session.entries.push(Entry::User {
                     text: text.clone(),
@@ -1115,7 +1124,7 @@ impl CrackView {
         let group = |name: &str| match name {
             "new" | "sessions" | "rename" | "copy" | "tab" | "close" => "Session",
             "models" | "effort" | "agents" | "connect" => "Agent",
-            "skills" | "init" | "reload" | "cd" => "Project",
+            "skills" | "init" | "reload" | "cd" | "compact" => "Project",
             "yolo" | "accept-edits" | "normal" | "sandbox" | "sandbox-network" => "Safety",
             _ => "System",
         };
@@ -1532,6 +1541,60 @@ impl CrackView {
 
 impl CrackView {
     /// Saves a tab's session (whatever changed since its last save).
+    /// Summarizes the active tab's conversation now (`/compact`).
+    fn compact_now(&mut self, cx: &mut Context<Self>) {
+        if self.running.is_some() {
+            self.show_toast("Wait for the reply to finish, then compact.", true, cx);
+            return;
+        }
+        if self.session.messages.len() < 2 {
+            self.show_toast("Nothing to compact yet.", false, cx);
+            return;
+        }
+        let config = match self.ws.turn_config(&self.selection) {
+            Ok(config) => config,
+            Err(error) => {
+                self.show_toast(format!("{error:#}"), true, cx);
+                return;
+            }
+        };
+        let tab = self.tab_id;
+        let history = self.session.messages.clone();
+        let before = self
+            .session
+            .context_tokens
+            .max(crate::agent::estimate_tokens(&history));
+        let client = self.ws.http.clone();
+        self.show_toast("Compacting the conversation…", false, cx);
+        let task = crate::runtime::spawn(async move {
+            crate::agent::compact(&config, &history, &client).await
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else { return };
+            let _ = this.update(cx, |view, cx| {
+                let event = match result {
+                    Ok(messages) => crate::agent::AgentEvent::Compacted { messages, before },
+                    Err(error) => {
+                        crate::agent::AgentEvent::Error(format!("Couldn't compact: {error:#}"))
+                    }
+                };
+                let agent = view.selection.agent;
+                let model = view.selection.model.clone().unwrap_or_default();
+                let session = if tab == view.tab_id {
+                    Some(&mut view.session)
+                } else {
+                    view.background.get_mut(&tab).map(|t| &mut t.session)
+                };
+                if let Some(session) = session {
+                    session.apply(&event, agent, &model);
+                }
+                view.save_tab(tab);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn save_tab(&mut self, tab: u64) {
         let session = if tab == self.tab_id {
             Some(&mut self.session)

@@ -260,6 +260,20 @@ impl Session {
                     meta.detail = Some(reason.clone());
                 }
             }
+            AgentEvent::Compacted { messages, before } => {
+                self.close_thinking();
+                self.messages = messages.clone();
+                self.saved_messages = 0;
+                self.context_tokens = crate::agent::estimate_tokens(messages);
+                self.updated = now();
+                self.entries.push(Entry::Notice {
+                    text: format!(
+                        "Compacted the conversation: {} → about {} tokens. Earlier messages stay here, but the model now sees a summary.",
+                        crate::ui::render::thousands(*before),
+                        crate::ui::render::thousands(self.context_tokens)
+                    ),
+                });
+            }
             AgentEvent::Notice(text) => self.entries.push(Entry::Notice { text: text.clone() }),
             AgentEvent::Error(text) => {
                 self.close_thinking();

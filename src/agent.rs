@@ -41,6 +41,11 @@ pub enum AgentEvent {
         id: String,
         reason: String,
     },
+    /// The history was replaced by a summary to make room.
+    Compacted {
+        messages: Vec<Message>,
+        before: u64,
+    },
     Error(String),
     Done {
         interrupted: bool,
@@ -64,6 +69,12 @@ pub struct TurnConfig {
     pub session_rules: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Where to ask for approval; `None` (headless) refuses what would need it.
     pub approvals: Option<mpsc::UnboundedSender<ApprovalRequest>>,
+    /// The model's context window, when known; compaction needs it.
+    pub context_window: Option<u64>,
+    /// Compact when the context passes this share of the window.
+    pub compact_at: f64,
+    /// How full the context was at the end of the last turn.
+    pub context_tokens: u64,
 }
 
 /// A tool call waiting for the user's yes or no.
@@ -141,7 +152,34 @@ async fn turn_loop(
     let client = ctx.http.clone();
     let specs = tools::specs(config.agent, ctx);
     let mut steps = 0;
+    let mut context = config.context_tokens;
+    let mut compact_failed = false;
+    let mut just_compacted = false;
     loop {
+        // Make room before the conversation outgrows the context window.
+        if let Some(window) = config.context_window
+            && context as f64 > window as f64 * config.compact_at
+            && history.len() > 1
+            && !compact_failed
+        {
+            match compact(config, history, &client).await {
+                Ok(summary) => {
+                    let _ = events.send(AgentEvent::Compacted {
+                        messages: summary.clone(),
+                        before: context,
+                    });
+                    *history = summary;
+                    just_compacted = true;
+                }
+                Err(error) => {
+                    // Don't try again every step; the request may still fit.
+                    compact_failed = true;
+                    let _ = events.send(AgentEvent::Notice(format!(
+                        "Couldn't compact the conversation: {error:#}"
+                    )));
+                }
+            }
+        }
         steps += 1;
         if let Some(max) = config.max_steps
             && steps > max
@@ -176,6 +214,20 @@ async fn turn_loop(
             .await?;
 
         let _ = events.send(AgentEvent::Usage(completion.usage));
+        context = completion.usage.context() + completion.usage.output_tokens;
+        if just_compacted {
+            just_compacted = false;
+            if let Some(window) = config.context_window
+                && context as f64 > window as f64 * config.compact_at
+            {
+                // The summary alone is too big; compacting again won't help.
+                compact_failed = true;
+                let _ = events.send(AgentEvent::Notice(
+                    "The context is still nearly full after compacting; start a new session soon."
+                        .into(),
+                ));
+            }
+        }
         history.push(completion.message.clone());
         let _ = events.send(AgentEvent::Message(completion.message.clone()));
 
@@ -330,4 +382,75 @@ async fn permit(
             }
         }
     }
+}
+
+const SUMMARY_PROMPT: &str = "\
+Summarize this conversation so that a fresh assistant can continue the work without \
+seeing it. Include, under short markdown headings:
+- the user's goals and requests (quote exact wording where it matters);
+- decisions made and why;
+- files read and changed, with paths, and what changed;
+- commands run and the results that matter (errors, test results);
+- the todo list and anything still open or failing;
+- the exact next step.
+Be concise but leave out nothing needed to continue. Reply with the summary only.";
+
+/// A rough token count (four characters a token), used until the model reports usage.
+pub fn estimate_tokens(history: &[Message]) -> u64 {
+    let chars: usize = history
+        .iter()
+        .flat_map(|m| &m.parts)
+        .map(|p| match p {
+            Part::Text { text } | Part::Thinking { text, .. } => text.len(),
+            Part::ToolUse { input, .. } => input.to_string().len(),
+            Part::ToolResult { content, .. } => content.len(),
+        })
+        .sum();
+    (chars / 4) as u64
+}
+
+/// Asks the model for a summary of `history` and returns the history that replaces
+/// it: one user message holding the summary and what to do next.
+pub async fn compact(
+    config: &TurnConfig,
+    history: &[Message],
+    client: &reqwest::Client,
+) -> anyhow::Result<Vec<Message>> {
+    // The newest plain user message, when the turn has only just begun.
+    let latest_request = history
+        .last()
+        .filter(|m| m.role == Role::User)
+        .and_then(|m| {
+            let has_results = m.parts.iter().any(|p| matches!(p, Part::ToolResult { .. }));
+            (!has_results).then(|| m.text())
+        });
+    let mut request_history = history.to_vec();
+    request_history.push(Message::user_text(SUMMARY_PROMPT));
+    let mut sink = |_| {};
+    let completion = config
+        .endpoint
+        .complete(
+            client,
+            ChatRequest {
+                model: &config.model,
+                system: "You write precise summaries of coding sessions.",
+                messages: &request_history,
+                tools: &[],
+                effort: Effort::Low,
+                max_tokens: 16_000,
+            },
+            &mut sink,
+        )
+        .await?;
+    let summary = completion.message.text();
+    if summary.trim().is_empty() {
+        anyhow::bail!("the model returned an empty summary");
+    }
+    let next = match latest_request {
+        Some(request) => format!("Now handle the user's latest request:\n\n{request}"),
+        None => "Continue the task in progress from where the summary ends.".to_owned(),
+    };
+    Ok(vec![Message::user_text(format!(
+        "This conversation was compacted to save context. Summary of everything so far:\n\n{summary}\n\n{next}"
+    ))])
 }
