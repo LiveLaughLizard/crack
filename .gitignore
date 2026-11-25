@@ -4,3 +4,5 @@ result
 evals/results/*
 !evals/results/README.md
 evals/.cache/
+dist/
+THIRD-PARTY-NOTICES

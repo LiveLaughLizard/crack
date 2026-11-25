@@ -1,0 +1,93 @@
+name: Release
+
+# Pushing a version tag (v0.2.0, ...) builds every build type and publishes a
+# GitHub Release with the archives and third-party license notices.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.flavor }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [default, no-china, airgap, strict]
+        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    # The oldest supported Ubuntu, so the binaries run on older glibc too.
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config cmake clang \
+            libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-xcb-dev libxcb1-dev
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.flavor }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-about
+
+      - name: Check the tag matches Cargo.toml
+        run: |
+          test "${GITHUB_REF_NAME#v}" = "$(just version)" || {
+            echo "Tag $GITHUB_REF_NAME doesn't match version $(just version) in Cargo.toml" >&2
+            exit 1
+          }
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.flavor }}" = default ]; then just build; else just build-${{ matrix.flavor }}; fi
+
+      - name: Package
+        run: just archive ${{ matrix.flavor }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crack-${{ matrix.flavor }}-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum *.tar.gz > SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          generate_release_notes: true
