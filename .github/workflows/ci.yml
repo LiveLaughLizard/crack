@@ -78,3 +78,13 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Headless smoke test against the mock
+        shell: bash
+        run: |
+          cargo build --examples
+          MOCK_ADDR=127.0.0.1:8765 ./target/debug/examples/mock_provider &
+          sleep 2
+          CRACK_BASE_URL=http://127.0.0.1:8765/v1 CRACK_DATA_DIR="$RUNNER_TEMP/crack" \
+            ./target/debug/crack run -m custom/mock --format json "say: hello from CI" | tee out.json
+          grep -q '"type":"done"' out.json
