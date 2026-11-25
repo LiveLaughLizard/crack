@@ -40,6 +40,11 @@ pub enum Part {
     Text {
         text: String,
     },
+    /// An image the user attached (base64), for models that read images.
+    Image {
+        media_type: String,
+        data: String,
+    },
     /// Reasoning. Anthropic thinking blocks carry a signature and must be passed back
     /// unchanged; other protocols drop them when replaying history.
     Thinking {

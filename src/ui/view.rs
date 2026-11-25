@@ -185,6 +185,8 @@ pub struct CrackView {
     pub(super) interrupted: Vec<(String, String)>,
     /// Project files for `@` suggestions, and when they were listed.
     file_cache: Option<(Instant, std::sync::Arc<Vec<String>>)>,
+    /// Images to send with the next message.
+    pub(super) attachments: Vec<super::attach::Attachment>,
     recent_models: Vec<String>,
     pub(super) discovering: bool,
     /// The window title last set; updated when the session or directory changes.
@@ -278,6 +280,7 @@ impl CrackView {
             memory_target: None,
             interrupted: Vec::new(),
             file_cache: None,
+            attachments: Vec::new(),
             recent_models,
             discovering: false,
             window_title: String::new(),
@@ -541,6 +544,7 @@ impl CrackView {
                     self.history_step(1, cx);
                 }
             }
+            InputEvent::PasteImage(image) => self.attach_image(image.clone(), cx),
         }
     }
 
@@ -930,6 +934,7 @@ impl CrackView {
                     text: text.clone(),
                     agent: self.selection.agent,
                     skill: None,
+                    images: Vec::new(),
                 });
                 self.session.entries.push(Entry::Error {
                     text: format!("{error:#}"),
@@ -944,6 +949,13 @@ impl CrackView {
         };
         self.session
             .push_user(&text, model_text, self.selection.agent, skill);
+        let images = std::mem::take(&mut self.attachments);
+        self.session.attach_images(
+            images
+                .into_iter()
+                .map(|a| (a.name, a.media_type, a.data))
+                .collect(),
+        );
         crate::recovery::mark_running(&self.session.id, &crate::memory::project_key(&self.ws.cwd));
         self.follow = true;
 

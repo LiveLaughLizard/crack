@@ -116,6 +116,7 @@ impl Picker {
                     InputEvent::Changed => this.refilter(cx),
                     InputEvent::Up => this.move_selection(-1, cx),
                     InputEvent::Down => this.move_selection(1, cx),
+                    InputEvent::PasteImage(_) => {}
                     InputEvent::Submit => this.confirm(cx),
                 },
             );

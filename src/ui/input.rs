@@ -79,7 +79,7 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum InputEvent {
     Submit,
     Changed,
@@ -87,6 +87,8 @@ pub enum InputEvent {
     Up,
     /// Down on the last line.
     Down,
+    /// An image was pasted (the prompt attaches it).
+    PasteImage(gpui::Image),
 }
 
 const CARET_BLINK: Duration = Duration::from_millis(1100);
@@ -338,7 +340,20 @@ impl TextInput {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        // A pasted screenshot goes to whoever listens (the prompt attaches it).
+        if !self.masked
+            && let Some(image) = item.entries().iter().find_map(|e| match e {
+                gpui::ClipboardEntry::Image(image) => Some(image.clone()),
+                _ => None,
+            })
+        {
+            cx.emit(InputEvent::PasteImage(image));
+            return;
+        }
+        if let Some(text) = item.text() {
             self.replace_selection(&text, window, cx);
         }
     }

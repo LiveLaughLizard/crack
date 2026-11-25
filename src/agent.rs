@@ -676,6 +676,8 @@ pub fn estimate_tokens(history: &[Message]) -> u64 {
             Part::Text { text } | Part::Thinking { text, .. } => text.len(),
             Part::ToolUse { input, .. } => input.to_string().len(),
             Part::ToolResult { content, .. } => content.len(),
+            // Providers charge roughly 1,600 tokens for a typical screenshot.
+            Part::Image { .. } => 6_400,
         })
         .sum();
     (chars / 4) as u64

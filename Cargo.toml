@@ -62,6 +62,7 @@ ignore = "0.4"
 # ripgrep's search engine, for the grep tool and the built-in `rg`.
 grep = "0.4"
 termcolor = "1"
+base64 = "0.22"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi", "std"] }
 tracing-appender = "0.2"
@@ -136,4 +137,3 @@ landlock = "0.4"
 [dev-dependencies]
 # The MCP tests' OAuth server parses forms and checks PKCE challenges.
 url = "2"
-base64 = "0.22"

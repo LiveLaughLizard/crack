@@ -31,6 +31,9 @@ pub enum Entry {
         agent: Agent,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         skill: Option<String>,
+        /// Names of images attached to the message.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<String>,
     },
     Text {
         text: String,
@@ -181,6 +184,7 @@ impl Session {
             text: shown.to_owned(),
             agent,
             skill,
+            images: Vec::new(),
         });
         self.messages.push(Message::user_text(model_text));
         self.updated = now();
@@ -541,6 +545,28 @@ impl Session {
             },
         });
         self.updated = now();
+    }
+
+    /// Adds images to the message just pushed: `(name, media type, base64 data)`.
+    pub fn attach_images(&mut self, images: Vec<(String, String, String)>) {
+        if images.is_empty() {
+            return;
+        }
+        if let Some(index) = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, Entry::User { .. }))
+            && let Entry::User { images: names, .. } = &mut self.entries[index]
+        {
+            names.extend(images.iter().map(|(name, _, _)| name.clone()));
+            self.touch(index);
+        }
+        if let Some(last) = self.messages.last_mut() {
+            for (_, media_type, data) in images {
+                last.parts
+                    .push(crate::providers::Part::Image { media_type, data });
+            }
+        }
     }
 
     /// Cuts the conversation back to `messages` model messages and `entries`

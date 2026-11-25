@@ -25,6 +25,8 @@ pub struct RunOptions {
     pub max_steps: Option<u32>,
     /// Stop once the run has cost this many dollars.
     pub max_cost: Option<f64>,
+    /// Image files to attach to the prompt.
+    pub images: Vec<std::path::PathBuf>,
     pub tools: Option<Vec<String>>,
     /// `last`, or a session id to continue.
     pub session: Option<String>,
@@ -123,6 +125,32 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
             session = crate::recovery::repair(&session.id, &workspace.cwd)?;
         }
         session.push_user(&shown, model_text, selection.agent, skill);
+        let mut images = Vec::new();
+        for path in &options.images {
+            let media_type = match path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("png") => "image/png",
+                Some("jpg" | "jpeg") => "image/jpeg",
+                Some("webp") => "image/webp",
+                Some("gif") => "image/gif",
+                _ => anyhow::bail!("{} isn't a PNG, JPEG, WebP or GIF image", path.display()),
+            };
+            let bytes =
+                std::fs::read(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            let name = path
+                .file_name()
+                .map_or("image".into(), |n| n.to_string_lossy().into_owned());
+            images.push((
+                name,
+                media_type.to_owned(),
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
+            ));
+        }
+        session.attach_images(images);
         crate::recovery::mark_running(&session.id, &crate::memory::project_key(&workspace.cwd));
         config.context_tokens = session.context_tokens;
         config.hooks.set_session(&session.id);

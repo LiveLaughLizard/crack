@@ -473,6 +473,10 @@ fn part_json(part: &Part) -> Option<Value> {
     Some(match part {
         Part::Text { text } if text.is_empty() => return None,
         Part::Text { text } => json!({"type": "text", "text": text}),
+        Part::Image { media_type, data } => json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data},
+        }),
         Part::Thinking {
             redacted: Some(data),
             ..
@@ -694,6 +698,18 @@ pub async fn google_access_token() -> anyhow::Result<String> {
 mod tests {
     use super::*;
     use crate::providers::ToolSpec;
+
+    #[test]
+    fn images_are_base64_blocks() {
+        let part = Part::Image {
+            media_type: "image/jpeg".into(),
+            data: "BBBB".into(),
+        };
+        assert_eq!(
+            part_json(&part).unwrap(),
+            json!({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "BBBB"}})
+        );
+    }
 
     fn request<'a>(
         model: &'a str,

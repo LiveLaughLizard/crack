@@ -305,6 +305,11 @@ servers off, or `lsp_wait_ms` to change how long crack waits for diagnostics aft
 
 ## Mentions
 
+**Images.** Paste a screenshot (ctrl-v) or drop image files on the window to attach them to
+your next message, for models that read images: Claude, GPT, Gemini and others. Dropping
+any other file adds an `@path` mention. Headless: `crack run --image shot.png "what's
+wrong here?"`.
+
 Type `@` in the prompt for fuzzy suggestions of the project's files. An `@path` attaches
 that file, or a folder's listing, to your message, up to 2,000 lines. Secrets like `.env`
 are never attached. MCP resources work the same way, as `@server:uri`.

@@ -270,7 +270,7 @@ impl ProvidersDialog {
                     InputEvent::Submit => this.save(window, cx),
                     InputEvent::Up => this.move_field(input, -1, window, cx),
                     InputEvent::Down => this.move_field(input, 1, window, cx),
-                    InputEvent::Changed => {}
+                    InputEvent::Changed | InputEvent::PasteImage(_) => {}
                 },
             ));
             inputs.push((spec, input));

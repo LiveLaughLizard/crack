@@ -311,6 +311,7 @@ impl CrackView {
                         .pt(px(12.))
                         .pb(px(10.))
                         .gap(px(10.))
+                        .children(self.render_attachments(cx))
                         .child(self.input.clone())
                         .child(meta),
                 ),
@@ -743,7 +744,12 @@ impl CrackView {
 
     fn render_entry(&self, index: usize, entry: &Entry, cx: &mut Context<Self>) -> AnyElement {
         match entry {
-            Entry::User { text, agent, skill } => {
+            Entry::User {
+                text,
+                agent,
+                skill,
+                images,
+            } => {
                 let mut content = div().flex().flex_col().gap(px(8.));
                 if let Some(skill) = skill {
                     content = content.child(
@@ -767,6 +773,24 @@ impl CrackView {
                                     .child(skill.clone()),
                             ),
                     );
+                }
+                if !images.is_empty() {
+                    let mut chips = div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(6.))
+                        .text_size(theme::SMALL_SIZE);
+                    for name in images {
+                        chips = chips.child(
+                            div()
+                                .px(px(6.))
+                                .bg(theme::raised_max())
+                                .text_color(theme::text_soft())
+                                .child(format!("\u{25a3} {name}")),
+                        );
+                    }
+                    content = content.child(chips);
                 }
                 let copy = text.clone();
                 div()
@@ -1319,6 +1343,11 @@ impl Render for CrackView {
 
         let mut root = div()
             .key_context("Workspace")
+            .on_drop(
+                cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                    this.on_drop_paths(paths, window, cx)
+                }),
+            )
             .relative()
             .size_full()
             .flex()

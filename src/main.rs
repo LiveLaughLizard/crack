@@ -58,6 +58,8 @@ enum Mode {
         sandbox: Option<bool>,
         /// Also log to stderr at this level (`--log debug`).
         log: Option<String>,
+        /// Image files to attach to the prompt.
+        images: Vec<std::path::PathBuf>,
     },
     Models {
         common: Common,
@@ -223,6 +225,7 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                         .usage("Output format")
                         .default_str("text"),
                     Flag::int("max-steps").usage("Stop after this many model requests"),
+                    Flag::string("image").usage("Attach image files to the prompt (comma-separated: a.png,b.jpg)"),
                     Flag::string("log").usage("Also print crack's log to stderr at this level: error, warn, info, debug or trace"),
                     Flag::string("max-cost").usage("Stop the run once it has cost this many dollars (e.g. 0.50)"),
                     Flag::string("tools").usage(
@@ -291,6 +294,10 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                             permission_mode,
                             sandbox,
                             log: ctx.flag("log").cloned(),
+                            images: ctx
+                                .flag("image")
+                                .map(|v| v.split(',').filter(|s| !s.trim().is_empty()).map(|s| s.trim().into()).collect())
+                                .unwrap_or_default(),
                         },
                     );
                     Ok(())
@@ -530,6 +537,7 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
             permission_mode,
             sandbox,
             log: _,
+            images,
         } => {
             if let Some(on) = sandbox {
                 policy::override_sandbox(on);
@@ -547,6 +555,7 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
                     max_cost,
                     tools,
                     session: common.session,
+                    images,
                 },
             )
         }

@@ -2,6 +2,7 @@
 //! home screen with the logo and prompt, a session screen with the transcript,
 //! prompt and sidebar, and keyboard-driven dialogs.
 
+mod attach;
 mod input;
 mod markdown;
 mod memory;

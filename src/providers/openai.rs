@@ -236,12 +236,17 @@ fn message_json(message: &Message, replay_reasoning: bool) -> Vec<Value> {
         Role::User => {
             let mut out = Vec::new();
             let mut text = String::new();
+            let mut images = Vec::new();
             for part in &message.parts {
                 match part {
                     Part::ToolResult { id, content, .. } => out.push(json!({
                         "role": "tool",
                         "tool_call_id": id,
                         "content": if content.is_empty() { "(no output)" } else { content },
+                    })),
+                    Part::Image { media_type, data } => images.push(json!({
+                        "type": "image_url",
+                        "image_url": {"url": format!("data:{media_type};base64,{data}")},
                     })),
                     Part::Text { text: t } => {
                         if !text.is_empty() {
@@ -252,7 +257,15 @@ fn message_json(message: &Message, replay_reasoning: bool) -> Vec<Value> {
                     _ => {}
                 }
             }
-            if !text.is_empty() {
+            if !images.is_empty() {
+                // Images go in a content array, after the text.
+                let mut content = Vec::new();
+                if !text.is_empty() {
+                    content.push(json!({"type": "text", "text": text}));
+                }
+                content.extend(images);
+                out.push(json!({"role": "user", "content": content}));
+            } else if !text.is_empty() {
                 out.push(json!({"role": "user", "content": text}));
             }
             out
@@ -455,6 +468,32 @@ fn snap_level(effort: Effort, levels: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn images_go_in_a_content_array() {
+        let message = Message {
+            role: Role::User,
+            parts: vec![
+                Part::Text {
+                    text: "what is this?".into(),
+                },
+                Part::Image {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                },
+            ],
+        };
+        let out = message_json(&message, false);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0]["content"][0],
+            json!({"type": "text", "text": "what is this?"})
+        );
+        assert_eq!(
+            out[0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA"
+        );
+    }
 
     fn endpoint(reasoning: ReasoningParam, replay: bool) -> OpenAiEndpoint {
         OpenAiEndpoint {
