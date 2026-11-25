@@ -76,6 +76,8 @@ pub struct ToolContext {
     pub lsp: bool,
     /// How long to wait for a language server's diagnostics after an edit.
     pub lsp_wait: Duration,
+    /// How `websearch` searches.
+    pub web: Arc<crate::websearch::Settings>,
 }
 
 /// How the interface draws a finished call.
@@ -149,6 +151,7 @@ const READ_ONLY: &[&str] = &[
     "grep",
     "list",
     "webfetch",
+    "websearch",
     "todowrite",
     "skill",
     "git_status",
@@ -293,6 +296,19 @@ pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
             }),
         ),
         spec(
+            "websearch",
+            "Search the web. Returns titles, URLs and snippets; read a result in full with webfetch. \
+             Use for current information: recent releases, docs for new versions, error messages, news.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to search for."},
+                    "max_results": {"type": "integer", "description": "How many results (default 8, max 20)."}
+                },
+                "required": ["query"]
+            }),
+        ),
+        spec(
             "todowrite",
             "Replace the session's todo list. Use it to plan and track multi-step work; keep exactly one item in_progress while working.",
             json!({
@@ -343,7 +359,10 @@ pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
         ));
     }
     // Air-gapped builds have no tool that reaches the internet.
-    all.retain(|tool| cfg!(feature = "cloud") || tool.name != "webfetch");
+    all.retain(|tool| {
+        cfg!(feature = "cloud") || !matches!(tool.name.as_str(), "webfetch" | "websearch")
+    });
+    all.retain(|tool| tool.name != "websearch" || ctx.web.mode != "off");
     // Reading an MCP server's resources is read-only, so every agent gets it.
     let resources = ctx.mcp.resources();
     if !resources.is_empty() {
@@ -454,6 +473,7 @@ pub fn title(name: &str, input: &Value) -> String {
             input.get("path").and_then(Value::as_str).unwrap_or(".")
         ),
         "webfetch" => format!("WebFetch {}", arg("url")),
+        "websearch" => format!("Search \"{}\"", arg("query")),
         "read_mcp_resource" => format!("Read {}:{}", arg("server"), arg("uri")),
         "todowrite" => "Todos".into(),
         "skill" => format!("Skill \"{}\"", arg("name")),
@@ -552,6 +572,8 @@ pub async fn run(name: &str, input: &Value, ctx: &ToolContext, agent: Agent) -> 
         "read_mcp_resource" => read_mcp_resource(input, ctx, &title).await,
         #[cfg(feature = "cloud")]
         "webfetch" => webfetch(input, ctx).await,
+        #[cfg(feature = "cloud")]
+        "websearch" => websearch(input, ctx).await,
         git if git.starts_with("git_") => crate::git::tool(git, input, ctx).await,
         "definition" | "references" | "hover" | "rename_symbol" => {
             if name == "rename_symbol" {
@@ -1128,6 +1150,24 @@ async fn list(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
 }
 
 #[cfg(feature = "cloud")]
+async fn websearch(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
+    let query = str_arg(input, "query").ok_or_else(|| anyhow::anyhow!("missing query"))?;
+    let max = input
+        .get("max_results")
+        .and_then(Value::as_u64)
+        .unwrap_or(8)
+        .clamp(1, 20) as usize;
+    let (hits, backend) = crate::websearch::search(&ctx.web, query, max, &ctx.http).await?;
+    Ok(ToolOutput::ok(
+        crate::websearch::format(query, &hits, backend),
+        ToolMeta {
+            title: format!("Search \"{query}\" ({} results, {backend})", hits.len()),
+            ..Default::default()
+        },
+    ))
+}
+
+#[cfg(feature = "cloud")]
 async fn webfetch(input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
     let url = str_arg(input, "url").ok_or_else(|| anyhow::anyhow!("missing url"))?;
     let response = ctx
@@ -1475,6 +1515,7 @@ mod tests {
             session_id: String::new(),
             memory: false,
             lsp_wait: Duration::from_secs(3),
+            web: Default::default(),
             mcp: crate::mcp::McpHub::new(Default::default(), reqwest::Client::new()),
             sandbox: None,
         }

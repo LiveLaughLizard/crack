@@ -36,6 +36,7 @@ mod subagents;
 mod tools;
 mod ui;
 mod usage;
+mod websearch;
 mod workspace;
 
 use flag_rs::{CommandBuilder, CompletionResult, Context, Flag, Shell};

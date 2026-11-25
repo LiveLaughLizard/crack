@@ -486,6 +486,20 @@ Hooks run in parallel with a 60-second timeout. Hooks from a project's own confi
 until you trust them, by running `crack hooks trust` or from the command palette. `crack
 hooks` lists them all.
 
+## Web search
+
+The model can search the web with `websearch`, then read results with `webfetch`. It
+works with no setup:
+
+- **Z.ai search** when you have a Z.ai key (GLM Coding Plan subscriptions include it).
+- **SearXNG**, if you run one: `searxng_url = "http://localhost:8888"` (with JSON output
+  enabled on the server).
+- **DuckDuckGo** otherwise, with no key.
+
+`auto` tries them in that order and falls back when one fails. Pick one with
+`web_search = "zai"`, `"searxng"` or `"duckduckgo"`, or turn it off with
+`web_search = "off"`. Air-gapped builds don't include it.
+
 ## Background commands
 
 The model can start long-running commands (dev servers, watchers, long builds) with

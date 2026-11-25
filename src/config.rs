@@ -30,6 +30,10 @@ pub struct Config {
     pub models: BTreeMap<String, crate::providers::models::ModelCaps>,
     /// Compact the conversation when it fills this share of the context window (0.8).
     pub compact_at: Option<f64>,
+    /// How `websearch` searches: `auto` (default), `zai`, `searxng`, `duckduckgo` or `off`.
+    pub web_search: Option<String>,
+    /// A SearXNG server for `websearch` (needs `format=json` enabled).
+    pub searxng_url: Option<String>,
     /// Trim old tool output when the conversation fills this share of the context window
     /// (0.6). Set it at or above `compact_at` to turn trimming off.
     pub trim_at: Option<f64>,
@@ -208,6 +212,12 @@ impl Config {
         self.models.extend(layer.models);
         if layer.compact_at.is_some() {
             self.compact_at = layer.compact_at;
+        }
+        if layer.web_search.is_some() {
+            self.web_search = layer.web_search;
+        }
+        if layer.searxng_url.is_some() {
+            self.searxng_url = layer.searxng_url;
         }
         if layer.trim_at.is_some() {
             self.trim_at = layer.trim_at;
