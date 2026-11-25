@@ -296,3 +296,7 @@ model server (OpenAI and Anthropic protocols) for trying crack without an API ke
 ```sh
 CRACK_BASE_URL=http://127.0.0.1:8765/v1 cargo run -- run -m custom/mock "run: ls"
 ```
+
+## License
+
+[MIT](LICENSE). Release binaries also carry the licenses of the libraries they include.

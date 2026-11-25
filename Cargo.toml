@@ -2,6 +2,8 @@
 name = "crack"
 version = "0.1.0"
 description = "A GPUI coding agent that behaves like a terminal agent CLI"
+license = "MIT"
+repository = "https://github.com/LiveLaughLizard/crack"
 edition = "2024"
 rust-version = "1.88"
 publish = false
