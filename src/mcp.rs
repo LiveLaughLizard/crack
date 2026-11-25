@@ -1,25 +1,33 @@
-//! Model Context Protocol client: connects to MCP servers and offers their tools to
-//! the model as `mcp__<server>__<tool>`.
+//! Model Context Protocol client, on the official Rust SDK (rmcp): connects to MCP
+//! servers and offers their tools to the model as `mcp__<server>__<tool>`, their
+//! resources through `read_mcp_resource` and `@server:uri`, and their prompts as
+//! `/server:prompt` commands.
 //!
 //! Servers come from `[mcp.<name>]` in crack's config and from `.mcp.json` files
 //! (Claude Code's format: `{"mcpServers": {...}}`) in the project. Two transports:
-//! stdio (a local command) and Streamable HTTP (a URL).
+//! stdio (a local command) and Streamable HTTP (a URL), with OAuth sign-in for HTTP
+//! servers that need it.
 
 use crate::config::{self, Config};
-use crate::providers::sse::SseReader;
 use anyhow::{Context as _, anyhow, bail};
+use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, ProtocolVersion};
+use rmcp::service::{NotificationContext, RunningService};
+use rmcp::transport::auth::OAuthState;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::{
+    AuthClient, AuthError, AuthorizationManager, AuthorizationRequest, CredentialStore,
+    StoredCredentials, StreamableHttpClientTransport, TokioChildProcess,
+};
+use rmcp::{ClientHandler, Peer, RoleClient, ServiceExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::oneshot;
 
-const PROTOCOL_VERSION: &str = "2025-06-18";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// One server's settings. Either `command` (stdio) or `url` (HTTP).
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -111,6 +119,8 @@ pub fn configured(cwd: &Path, config: &Config) -> BTreeMap<String, McpServerConf
 pub enum Status {
     Connecting,
     Connected,
+    /// The server wants OAuth: sign in from the MCP picker or `crack mcp login`.
+    NeedsAuth,
     Failed(String),
     Disabled,
 }
@@ -125,19 +135,52 @@ pub struct McpTool {
     pub exposed: String,
 }
 
+/// A resource a server offers (`resources/list`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpResource {
+    pub server: String,
+    pub uri: String,
+    pub name: String,
+    pub description: String,
+    pub mime_type: Option<String>,
+}
+
+/// A prompt a server offers (`prompts/list`), used as `/server:prompt`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpPrompt {
+    pub server: String,
+    pub name: String,
+    pub description: String,
+    /// `(name, required)`, in order.
+    pub arguments: Vec<(String, bool)>,
+}
+
+impl McpPrompt {
+    /// The slash command: `server:prompt`.
+    pub fn command(&self) -> String {
+        format!("{}:{}", self.server, self.name)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ServerInfo {
     pub name: String,
     pub transport: &'static str,
     pub status: Status,
     pub tools: usize,
+    pub resources: usize,
+    pub prompts: usize,
 }
+
+type Client = RunningService<RoleClient, Handler>;
 
 struct Server {
     name: String,
     config: McpServerConfig,
     status: Status,
     tools: Vec<McpTool>,
+    resources: Vec<McpResource>,
+    prompts: Vec<McpPrompt>,
     client: Option<Arc<Client>>,
 }
 
@@ -166,6 +209,122 @@ fn exposed_name(server: &str, tool: &str) -> String {
     name
 }
 
+/// Receives server notifications: list changes refresh what crack offers.
+#[derive(Clone)]
+struct Handler {
+    hub: Weak<McpHub>,
+    server: String,
+}
+
+impl ClientHandler for Handler {
+    fn get_info(&self) -> ClientConfig {
+        // The `initialize` handshake works with every server in use today.
+        ClientConfig::new(
+            ClientCapabilities::default(),
+            Implementation::new("crack", env!("CARGO_PKG_VERSION")),
+        )
+        .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
+    }
+
+    async fn on_tool_list_changed(&self, context: NotificationContext<RoleClient>) {
+        self.refresh(&context.peer).await;
+    }
+
+    async fn on_resource_list_changed(&self, context: NotificationContext<RoleClient>) {
+        self.refresh(&context.peer).await;
+    }
+
+    async fn on_prompt_list_changed(&self, context: NotificationContext<RoleClient>) {
+        self.refresh(&context.peer).await;
+    }
+}
+
+impl Handler {
+    async fn refresh(&self, peer: &Peer<RoleClient>) {
+        let Some(hub) = self.hub.upgrade() else {
+            return;
+        };
+        match list_everything(&self.server, peer).await {
+            Ok(lists) => hub.store_lists(&self.server, lists),
+            Err(error) => eprintln!(
+                "crack: MCP server {}: refresh failed: {error:#}",
+                self.server
+            ),
+        }
+    }
+}
+
+type Lists = (Vec<McpTool>, Vec<McpResource>, Vec<McpPrompt>);
+
+/// Lists tools, resources and prompts, as far as the server offers each.
+async fn list_everything(name: &str, peer: &Peer<RoleClient>) -> anyhow::Result<Lists> {
+    let capabilities = peer
+        .peer_info()
+        .and_then(|info| serde_json::to_value(&*info).ok())
+        .map(|info| info["capabilities"].clone())
+        .unwrap_or(Value::Null);
+    let offers = |what: &str| capabilities.get(what).is_some_and(|v| !v.is_null());
+    let mut tools = Vec::new();
+    if offers("tools") {
+        for tool in peer.list_all_tools().await.context("tools/list")? {
+            let tool = serde_json::to_value(&tool)?;
+            let tool_name = tool["name"].as_str().unwrap_or_default().to_owned();
+            let mut schema = tool["inputSchema"].clone();
+            if !schema.is_object() {
+                schema = json!({"type": "object", "properties": {}});
+            }
+            tools.push(McpTool {
+                exposed: exposed_name(name, &tool_name),
+                server: name.to_owned(),
+                description: tool["description"].as_str().unwrap_or_default().to_owned(),
+                schema,
+                name: tool_name,
+            });
+        }
+    }
+    let mut resources = Vec::new();
+    if offers("resources") {
+        // A server that advertises resources but can't list them still has tools.
+        if let Ok(list) = peer.list_all_resources().await {
+            for resource in list {
+                let r = serde_json::to_value(&resource)?;
+                resources.push(McpResource {
+                    server: name.to_owned(),
+                    uri: r["uri"].as_str().unwrap_or_default().to_owned(),
+                    name: r["name"].as_str().unwrap_or_default().to_owned(),
+                    description: r["description"].as_str().unwrap_or_default().to_owned(),
+                    mime_type: r["mimeType"].as_str().map(str::to_owned),
+                });
+            }
+        }
+    }
+    let mut prompts = Vec::new();
+    if offers("prompts")
+        && let Ok(list) = peer.list_all_prompts().await
+    {
+        for prompt in list {
+            let p = serde_json::to_value(&prompt)?;
+            prompts.push(McpPrompt {
+                server: name.to_owned(),
+                name: p["name"].as_str().unwrap_or_default().to_owned(),
+                description: p["description"].as_str().unwrap_or_default().to_owned(),
+                arguments: p["arguments"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|a| {
+                        (
+                            a["name"].as_str().unwrap_or_default().to_owned(),
+                            a["required"].as_bool().unwrap_or(false),
+                        )
+                    })
+                    .collect(),
+            });
+        }
+    }
+    Ok((tools, resources, prompts))
+}
+
 impl McpHub {
     pub fn new(configs: BTreeMap<String, McpServerConfig>, http: reqwest::Client) -> Arc<McpHub> {
         let servers = configs
@@ -179,6 +338,8 @@ impl McpHub {
                 name,
                 config,
                 tools: Vec::new(),
+                resources: Vec::new(),
+                prompts: Vec::new(),
                 client: None,
             })
             .collect();
@@ -202,18 +363,41 @@ impl McpHub {
                 transport: s.config.transport(),
                 status: s.status.clone(),
                 tools: s.tools.len(),
+                resources: s.resources.len(),
+                prompts: s.prompts.len(),
             })
             .collect()
     }
 
-    pub fn tools(&self) -> Vec<McpTool> {
+    fn connected<T: Clone>(&self, pick: impl Fn(&Server) -> &Vec<T>) -> Vec<T> {
         self.servers
             .lock()
             .unwrap()
             .iter()
             .filter(|s| s.status == Status::Connected)
-            .flat_map(|s| s.tools.clone())
+            .flat_map(|s| pick(s).clone())
             .collect()
+    }
+
+    pub fn tools(&self) -> Vec<McpTool> {
+        self.connected(|s| &s.tools)
+    }
+
+    pub fn resources(&self) -> Vec<McpResource> {
+        self.connected(|s| &s.resources)
+    }
+
+    pub fn prompts(&self) -> Vec<McpPrompt> {
+        self.connected(|s| &s.prompts)
+    }
+
+    fn store_lists(&self, name: &str, (tools, resources, prompts): Lists) {
+        let mut servers = self.servers.lock().unwrap();
+        if let Some(server) = servers.iter_mut().find(|s| s.name == name) {
+            server.tools = tools;
+            server.resources = resources;
+            server.prompts = prompts;
+        }
     }
 
     /// Connects every enabled server, concurrently.
@@ -231,66 +415,364 @@ impl McpHub {
 
     /// (Re)connects one server.
     pub async fn connect(self: &Arc<Self>, name: &str) {
-        let config = {
+        let (config, old) = {
             let mut servers = self.servers.lock().unwrap();
             let Some(server) = servers.iter_mut().find(|s| s.name == name) else {
                 return;
             };
             server.status = Status::Connecting;
-            server.client = None;
             server.tools.clear();
-            server.config.clone()
+            server.resources.clear();
+            server.prompts.clear();
+            (server.config.clone(), server.client.take())
         };
-        let result = tokio::time::timeout(CONNECT_TIMEOUT, start(name, &config, &self.http))
+        // Close the old connection (and stop its process) before starting again.
+        drop(old);
+        let handler = Handler {
+            hub: Arc::downgrade(self),
+            server: name.to_owned(),
+        };
+        let result = tokio::time::timeout(CONNECT_TIMEOUT, start(handler, &config, &self.http))
             .await
-            .unwrap_or_else(|_| Err(anyhow!("no answer within {}s", CONNECT_TIMEOUT.as_secs())));
+            .unwrap_or_else(|_| {
+                Err(Failure::Other(anyhow!(
+                    "no answer within {}s",
+                    CONNECT_TIMEOUT.as_secs()
+                )))
+            });
+        let result = match result {
+            Ok(client) => list_everything(name, client.peer())
+                .await
+                .map(|lists| (client, lists))
+                .map_err(Failure::Other),
+            Err(error) => Err(error),
+        };
         let mut servers = self.servers.lock().unwrap();
         let Some(server) = servers.iter_mut().find(|s| s.name == name) else {
             return;
         };
         match result {
-            Ok((client, tools)) => {
-                server.client = Some(client);
+            Ok((client, (tools, resources, prompts))) => {
+                server.client = Some(Arc::new(client));
                 server.tools = tools;
+                server.resources = resources;
+                server.prompts = prompts;
                 server.status = Status::Connected;
             }
-            Err(error) => server.status = Status::Failed(format!("{error:#}")),
+            Err(Failure::NeedsAuth) => server.status = Status::NeedsAuth,
+            Err(Failure::Other(error)) => server.status = Status::Failed(readable(&format!("{error:#}"))),
         }
+    }
+
+    fn client(&self, server: &str) -> anyhow::Result<(Arc<Client>, Duration)> {
+        let servers = self.servers.lock().unwrap();
+        let entry = servers
+            .iter()
+            .find(|s| s.name == server)
+            .ok_or_else(|| anyhow!("no MCP server named '{server}'"))?;
+        let client = entry
+            .client
+            .clone()
+            .ok_or_else(|| anyhow!("MCP server '{server}' is not connected"))?;
+        Ok((
+            client,
+            Duration::from_secs(entry.config.timeout.unwrap_or(120)),
+        ))
     }
 
     /// Calls a tool by its exposed name. Returns the text and whether it is an error.
     pub async fn call(&self, exposed: &str, arguments: Value) -> anyhow::Result<(String, bool)> {
-        let (client, tool, timeout) = {
-            let servers = self.servers.lock().unwrap();
-            let (server, tool) = servers
-                .iter()
-                .find_map(|s| {
-                    s.tools
-                        .iter()
-                        .find(|t| t.exposed == exposed)
-                        .map(|t| (s, t))
-                })
-                .ok_or_else(|| anyhow!("no MCP tool named {exposed}"))?;
-            let client = server
-                .client
-                .clone()
-                .ok_or_else(|| anyhow!("MCP server '{}' is not connected", server.name))?;
-            (
-                client,
-                tool.name.clone(),
-                Duration::from_secs(server.config.timeout.unwrap_or(120)),
-            )
+        let (server, tool) = self
+            .tools()
+            .into_iter()
+            .find(|t| t.exposed == exposed)
+            .map(|t| (t.server, t.name))
+            .ok_or_else(|| anyhow!("no MCP tool named {exposed}"))?;
+        let (client, timeout) = self.client(&server)?;
+        let arguments = if arguments.is_object() {
+            arguments
+        } else {
+            json!({})
         };
-        let result = tokio::time::timeout(
-            timeout,
-            client.request("tools/call", json!({"name": tool, "arguments": arguments})),
-        )
-        .await
-        .map_err(|_| anyhow!("the MCP tool took longer than {}s", timeout.as_secs()))??;
+        let params = serde_json::from_value(json!({"name": tool, "arguments": arguments}))?;
+        let result = tokio::time::timeout(timeout, client.call_tool(params))
+            .await
+            .map_err(|_| anyhow!("the MCP tool took longer than {}s", timeout.as_secs()))??;
+        let result = serde_json::to_value(&result)?;
         Ok((
             render_content(&result),
             result["isError"].as_bool().unwrap_or(false),
         ))
+    }
+
+    /// Reads a resource's contents as text (binary parts are described).
+    pub async fn read_resource(&self, server: &str, uri: &str) -> anyhow::Result<String> {
+        let (client, timeout) = self.client(server)?;
+        let params = serde_json::from_value(json!({"uri": uri}))?;
+        let result = tokio::time::timeout(timeout, client.read_resource(params))
+            .await
+            .map_err(|_| anyhow!("reading {uri} took longer than {}s", timeout.as_secs()))??;
+        let result = serde_json::to_value(&result)?;
+        let parts: Vec<String> = result["contents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| match c["text"].as_str() {
+                Some(text) => text.to_owned(),
+                None => format!(
+                    "[binary resource {} ({})]",
+                    c["uri"].as_str().unwrap_or(uri),
+                    c["mimeType"].as_str().unwrap_or("unknown type")
+                ),
+            })
+            .collect();
+        Ok(parts.join("\n"))
+    }
+
+    /// Fills in a prompt (`prompts/get`) and returns its messages as text.
+    pub async fn get_prompt(
+        &self,
+        server: &str,
+        prompt: &str,
+        arguments: BTreeMap<String, String>,
+    ) -> anyhow::Result<String> {
+        let (client, timeout) = self.client(server)?;
+        let params = serde_json::from_value(json!({"name": prompt, "arguments": arguments}))?;
+        let result = tokio::time::timeout(timeout, client.get_prompt(params))
+            .await
+            .map_err(|_| anyhow!("the prompt took longer than {}s", timeout.as_secs()))??;
+        let result = serde_json::to_value(&result)?;
+        let mut parts = Vec::new();
+        for message in result["messages"].as_array().into_iter().flatten() {
+            let content = &message["content"];
+            let text = match content["type"].as_str() {
+                Some("text") => content["text"].as_str().unwrap_or_default().to_owned(),
+                Some("resource") => content["resource"]["text"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("[resource {}]", content["resource"]["uri"])),
+                Some(other) => format!("[{other} content]"),
+                None => String::new(),
+            };
+            if message["role"] == "assistant" {
+                parts.push(format!("(assistant) {text}"));
+            } else {
+                parts.push(text);
+            }
+        }
+        Ok(parts.join("\n\n"))
+    }
+
+    /// Signs in to an HTTP server with OAuth: `open` is given the browser URL, and
+    /// the browser comes back to a localhost callback. Then the server reconnects.
+    pub async fn sign_in(
+        self: &Arc<Self>,
+        name: &str,
+        open: impl FnOnce(String) + Send,
+    ) -> anyhow::Result<()> {
+        let url = {
+            let servers = self.servers.lock().unwrap();
+            let server = servers
+                .iter()
+                .find(|s| s.name == name)
+                .ok_or_else(|| anyhow!("no MCP server named '{name}'"))?;
+            server.config.url.clone().ok_or_else(|| {
+                anyhow!("'{name}' isn't an HTTP server; there's nothing to sign in to")
+            })?
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let redirect = format!(
+            "http://127.0.0.1:{}/callback",
+            listener.local_addr()?.port()
+        );
+        let mut manager = AuthorizationManager::new(url.as_str()).await?;
+        manager.set_credential_store(FileStore { url: url.clone() });
+        let mut state = OAuthState::Unauthorized(manager);
+        state
+            .start_authorization(AuthorizationRequest::new(&redirect).with_client_name("crack"))
+            .await
+            .context("starting sign-in")?;
+        open(state.get_authorization_url().await?);
+        let callback = tokio::time::timeout(SIGN_IN_TIMEOUT, accept_callback(&listener, name))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "sign-in wasn't finished within {} minutes",
+                    SIGN_IN_TIMEOUT.as_secs() / 60
+                )
+            })??;
+        state
+            .handle_callback_url(&callback)
+            .await
+            .context("finishing sign-in")?;
+        self.connect(name).await;
+        Ok(())
+    }
+
+    /// What a prompt pulls in from MCP: the text of each `@server:uri` resource it
+    /// mentions, and a `/server:prompt args` at its start filled in. Each block is
+    /// extra context for the user's message; failures say what went wrong.
+    pub async fn expand_prompt(&self, text: &str) -> Vec<String> {
+        let mut blocks = Vec::new();
+        if let Some(rest) = text.trim_start().strip_prefix('/') {
+            let (command, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            if let Some(prompt) = self.prompts().into_iter().find(|p| p.command() == command) {
+                let arguments = prompt_arguments(&prompt, args);
+                blocks.push(
+                    match self
+                        .get_prompt(&prompt.server, &prompt.name, arguments)
+                        .await
+                    {
+                        Ok(body) => format!("The user ran the MCP prompt /{command}:\n\n{body}"),
+                        Err(error) => format!("The MCP prompt /{command} failed: {error:#}"),
+                    },
+                );
+            }
+        }
+        let resources = self.resources();
+        let mut seen = Vec::new();
+        for word in text.split_whitespace() {
+            let Some(reference) = word.strip_prefix('@') else {
+                continue;
+            };
+            let reference = reference.trim_end_matches([',', '.', ';', ')', '?', '!']);
+            let Some((server, uri)) = reference.split_once(':') else {
+                continue;
+            };
+            if seen.iter().any(|s| s == reference)
+                || !resources.iter().any(|r| r.server == server && r.uri == uri)
+            {
+                continue;
+            }
+            seen.push(reference.to_owned());
+            blocks.push(match self.read_resource(server, uri).await {
+                Ok(body) => format!("Contents of the MCP resource @{server}:{uri}:\n\n{body}"),
+                Err(error) => format!("Couldn't read the MCP resource @{server}:{uri}: {error:#}"),
+            });
+        }
+        blocks
+    }
+
+    /// Forgets a server's OAuth tokens.
+    pub fn sign_out(&self, name: &str) -> anyhow::Result<()> {
+        let url = self
+            .servers
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.config.url.clone())
+            .ok_or_else(|| anyhow!("no HTTP MCP server named '{name}'"))?;
+        config::save_mcp_oauth(&credentials_file()?, &url, None)
+    }
+}
+
+/// `key=value` words become named arguments; any other text fills the first
+/// argument not given by name.
+fn prompt_arguments(prompt: &McpPrompt, args: &str) -> BTreeMap<String, String> {
+    let mut named = BTreeMap::new();
+    let mut loose = Vec::new();
+    for word in args.split_whitespace() {
+        match word.split_once('=') {
+            Some((key, value)) if prompt.arguments.iter().any(|(name, _)| name == key) => {
+                named.insert(key.to_owned(), value.to_owned());
+            }
+            _ => loose.push(word),
+        }
+    }
+    if !loose.is_empty()
+        && let Some((name, _)) = prompt
+            .arguments
+            .iter()
+            .find(|(name, _)| !named.contains_key(name))
+    {
+        named.insert(name.clone(), loose.join(" "));
+    }
+    named
+}
+
+/// Waits for the browser to come back to the localhost callback; returns its URL.
+async fn accept_callback(listener: &tokio::net::TcpListener, name: &str) -> anyhow::Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    loop {
+        let (mut socket, _) = listener.accept().await?;
+        let mut buffer = vec![0u8; 8192];
+        let n = socket.read(&mut buffer).await?;
+        let head = String::from_utf8_lossy(&buffer[..n]);
+        let target = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/")
+            .to_owned();
+        if !target.starts_with("/callback") {
+            // Browsers also ask for /favicon.ico and the like.
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+            continue;
+        }
+        let body = format!(
+            "<!doctype html><meta charset=utf-8><title>crack</title>\
+             <body style=\"font-family:sans-serif;padding:3em\">\
+             <h2>Signed in to {name}</h2><p>You can close this tab and go back to crack.</p>"
+        );
+        let _ = socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await;
+        let port = listener.local_addr()?.port();
+        return Ok(format!("http://127.0.0.1:{port}{target}"));
+    }
+}
+
+/// Tests point the credentials file somewhere private.
+#[cfg(test)]
+static TEST_CREDENTIALS: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+/// crack's credentials file, where OAuth tokens are kept.
+fn credentials_file() -> anyhow::Result<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_CREDENTIALS.lock().unwrap().clone() {
+        return Ok(path);
+    }
+    config::credentials_path().ok_or_else(|| anyhow!("no config directory"))
+}
+
+/// OAuth tokens in crack's credentials file (0600), per server URL.
+struct FileStore {
+    url: String,
+}
+
+#[async_trait::async_trait]
+impl CredentialStore for FileStore {
+    async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
+        let Ok(path) = credentials_file() else {
+            return Ok(None);
+        };
+        Ok(config::load_mcp_oauth(&path, &self.url)
+            .and_then(|json| serde_json::from_str(&json).ok()))
+    }
+
+    async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
+        let json = serde_json::to_string(&credentials)
+            .map_err(|e| AuthError::CredentialStoreError(e.to_string()))?;
+        credentials_file()
+            .and_then(|path| config::save_mcp_oauth(&path, &self.url, Some(&json)))
+            .map_err(|e| AuthError::CredentialStoreError(format!("{e:#}")))
+    }
+
+    async fn clear(&self) -> Result<(), AuthError> {
+        credentials_file()
+            .and_then(|path| config::save_mcp_oauth(&path, &self.url, None))
+            .map_err(|e| AuthError::CredentialStoreError(format!("{e:#}")))
     }
 }
 
@@ -323,348 +805,147 @@ fn render_content(result: &Value) -> String {
         }
     }
     if parts.is_empty()
-        && let Some(structured) = result.get("structuredContent")
+        && let Some(structured) = result.get("structuredContent").filter(|v| !v.is_null())
     {
         return structured.to_string();
     }
     parts.join("\n")
 }
 
-/// Connects, initializes and lists tools.
+/// Why a connection didn't come up.
+enum Failure {
+    NeedsAuth,
+    Other(anyhow::Error),
+}
+
+/// Starts the transport and runs the `initialize` handshake.
 async fn start(
-    name: &str,
+    handler: Handler,
     config: &McpServerConfig,
     http: &reqwest::Client,
-) -> anyhow::Result<(Arc<Client>, Vec<McpTool>)> {
-    let client = Arc::new(match (&config.url, &config.command) {
-        (Some(url), _) => Client::Http(HttpClient {
-            http: http.clone(),
-            url: url.clone(),
-            headers: config.headers.clone(),
-            session: Mutex::new(None),
-            next_id: AtomicU64::new(1),
-        }),
-        (None, Some(command)) => Client::Stdio(StdioClient::spawn(command, config)?),
-        (None, None) => bail!("set either `command` or `url`"),
-    });
-    let init = client
-        .request(
-            "initialize",
-            json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "crack", "version": env!("CARGO_PKG_VERSION")},
-            }),
-        )
-        .await
-        .context("initialize")?;
-    if init["capabilities"].get("tools").is_none() {
-        // Servers without tools are fine; there's just nothing to offer.
-        client
-            .notify("notifications/initialized", json!({}))
-            .await?;
-        return Ok((client, Vec::new()));
-    }
-    client
-        .notify("notifications/initialized", json!({}))
-        .await?;
-
-    let mut tools = Vec::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        let params = match &cursor {
-            Some(c) => json!({"cursor": c}),
-            None => json!({}),
-        };
-        let page = client
-            .request("tools/list", params)
+) -> Result<Client, Failure> {
+    match (&config.url, &config.command) {
+        (Some(url), _) => start_http(handler, url, config, http).await,
+        (None, Some(command)) => start_stdio(handler, command, config)
             .await
-            .context("tools/list")?;
-        for tool in page["tools"].as_array().into_iter().flatten() {
-            let tool_name = tool["name"].as_str().unwrap_or_default().to_owned();
-            let mut schema = tool["inputSchema"].clone();
-            if !schema.is_object() {
-                schema = json!({"type": "object", "properties": {}});
-            }
-            tools.push(McpTool {
-                exposed: exposed_name(name, &tool_name),
-                server: name.to_owned(),
-                description: tool["description"].as_str().unwrap_or_default().to_owned(),
-                schema,
-                name: tool_name,
-            });
-        }
-        cursor = page["nextCursor"].as_str().map(str::to_owned);
-        if cursor.is_none() {
-            break;
-        }
-    }
-    Ok((client, tools))
-}
-
-enum Client {
-    Stdio(StdioClient),
-    Http(HttpClient),
-}
-
-impl Client {
-    async fn request(&self, method: &str, params: Value) -> anyhow::Result<Value> {
-        match self {
-            Client::Stdio(c) => c.request(method, params).await,
-            Client::Http(c) => c.request(method, params).await,
-        }
-    }
-
-    async fn notify(&self, method: &str, params: Value) -> anyhow::Result<()> {
-        match self {
-            Client::Stdio(c) => {
-                c.send(json!({"jsonrpc": "2.0", "method": method, "params": params}))
-                    .await
-            }
-            Client::Http(c) => c.notify(method, params).await,
-        }
+            .map_err(Failure::Other),
+        (None, None) => Err(Failure::Other(anyhow!("set either `command` or `url`"))),
     }
 }
 
-fn rpc_result(message: &Value) -> anyhow::Result<Value> {
-    if let Some(error) = message.get("error") {
-        bail!(
-            "{} (code {})",
-            error["message"].as_str().unwrap_or("error"),
-            error["code"]
-        );
+async fn start_stdio(
+    handler: Handler,
+    command: &str,
+    config: &McpServerConfig,
+) -> anyhow::Result<Client> {
+    let mut cmd = tokio::process::Command::new(command);
+    cmd.args(&config.args).envs(&config.env);
+    if let Some(dir) = &config.cwd {
+        cmd.current_dir(config::expand_home(dir));
     }
-    Ok(message["result"].clone())
-}
-
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
-
-struct StdioClient {
-    stdin: Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
-    pending: Pending,
-    next_id: AtomicU64,
-    /// Last lines the server wrote to stderr, for error messages.
-    stderr: Arc<Mutex<Vec<String>>>,
-    _child: tokio::process::Child,
-}
-
-impl StdioClient {
-    fn spawn(command: &str, config: &McpServerConfig) -> anyhow::Result<StdioClient> {
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(&config.args)
-            .envs(&config.env)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        if let Some(dir) = &config.cwd {
-            cmd.current_dir(config::expand_home(dir));
-        }
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("couldn't start `{command}`"))?;
-        let stdin = child.stdin.take().expect("piped");
-        let stdout = child.stdout.take().expect("piped");
-        let mut stderr_pipe = child.stderr.take().expect("piped");
-        let pending: Pending = Arc::default();
-        let stderr = Arc::new(Mutex::new(Vec::new()));
-
-        let tail = stderr.clone();
+    let (transport, stderr) = TokioChildProcess::builder(cmd)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("couldn't start `{command}`"))?;
+    // Keep the last lines the server wrote to stderr, for error messages.
+    let tail = Arc::new(Mutex::new(Vec::<String>::new()));
+    if let Some(stderr) = stderr {
+        let tail = tail.clone();
         tokio::spawn(async move {
-            let mut buffer = String::new();
-            let _ = stderr_pipe.read_to_string(&mut buffer).await;
-            let lines: Vec<String> = buffer.lines().rev().take(5).map(str::to_owned).collect();
-            *tail.lock().unwrap() = lines.into_iter().rev().collect();
-        });
-
-        let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-        let reader_pending = pending.clone();
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(message) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                let id = message.get("id");
-                if message.get("method").is_some() {
-                    // A request from the server: answer pings, decline the rest.
-                    if let Some(id) = id {
-                        let reply = if message["method"] == "ping" {
-                            json!({"jsonrpc": "2.0", "id": id, "result": {}})
-                        } else {
-                            json!({"jsonrpc": "2.0", "id": id,
-                                   "error": {"code": -32601, "message": "not supported by crack"}})
-                        };
-                        let _ = reply_tx.send(reply);
-                    }
-                } else if let Some(id) = id.and_then(Value::as_u64)
-                    && let Some(waiter) = reader_pending.lock().unwrap().remove(&id)
-                {
-                    let _ = waiter.send(message);
-                }
-            }
-            // The server exited: wake everyone still waiting.
-            reader_pending.lock().unwrap().clear();
-        });
-
-        // Replies to server requests share stdin with our own requests.
-        let stdin = Arc::new(tokio::sync::Mutex::new(stdin));
-        let writer = stdin.clone();
-        tokio::spawn(async move {
-            while let Some(reply) = reply_rx.recv().await {
-                let Ok(mut line) = serde_json::to_vec(&reply) else {
-                    continue;
-                };
-                line.push(b'\n');
-                let mut stdin = writer.lock().await;
-                if stdin.write_all(&line).await.is_err() {
-                    break;
-                }
-                let _ = stdin.flush().await;
+                let mut tail = tail.lock().unwrap();
+                tail.push(line);
+                let excess = tail.len().saturating_sub(5);
+                tail.drain(..excess);
             }
         });
-
-        Ok(StdioClient {
-            stdin,
-            pending,
-            next_id: AtomicU64::new(1),
-            stderr,
-            _child: child,
-        })
     }
-
-    async fn send(&self, message: Value) -> anyhow::Result<()> {
-        let mut line = serde_json::to_vec(&message)?;
-        line.push(b'\n');
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(&line).await?;
-        stdin.flush().await?;
-        Ok(())
-    }
-
-    async fn request(&self, method: &str, params: Value) -> anyhow::Result<Value> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
-        self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
-            .await
-            .map_err(|e| anyhow!("{e}: {}", self.stderr_tail()))?;
-        match rx.await {
-            Ok(message) => rpc_result(&message),
-            Err(_) => Err(anyhow!("the server exited. {}", self.stderr_tail())),
+    match handler.serve(transport).await {
+        Ok(client) => Ok(client),
+        Err(error) => {
+            // Give stderr a moment to arrive; it usually says what went wrong.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let tail = tail.lock().unwrap().join(" | ");
+            if tail.is_empty() {
+                bail!("{error}")
+            } else {
+                bail!("{error}: {tail}")
+            }
         }
-    }
-
-    fn stderr_tail(&self) -> String {
-        self.stderr.lock().unwrap().join(" | ")
     }
 }
 
-struct HttpClient {
-    http: reqwest::Client,
-    url: String,
-    headers: BTreeMap<String, String>,
-    /// `Mcp-Session-Id` from the initialize response.
-    session: Mutex<Option<String>>,
-    next_id: AtomicU64,
+async fn start_http(
+    handler: Handler,
+    url: &str,
+    config: &McpServerConfig,
+    http: &reqwest::Client,
+) -> Result<Client, Failure> {
+    let mut headers = HashMap::new();
+    for (name, value) in &config.headers {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| Failure::Other(anyhow!("header {name}: {e}")))?;
+        let value = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|e| Failure::Other(anyhow!("header {name}: {e}")))?;
+        headers.insert(name, value);
+    }
+    let transport_config =
+        StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers);
+    let result = match stored_authorization(url).await {
+        Some(manager) => {
+            let client = AuthClient::new(http.clone(), manager);
+            handler
+                .serve(StreamableHttpClientTransport::with_client(
+                    client,
+                    transport_config,
+                ))
+                .await
+        }
+        None => {
+            handler
+                .serve(StreamableHttpClientTransport::with_client(
+                    http.clone(),
+                    transport_config,
+                ))
+                .await
+        }
+    };
+    result.map_err(|error| {
+        if error.is_authorization_required() {
+            Failure::NeedsAuth
+        } else {
+            Failure::Other(anyhow!("{error}"))
+        }
+    })
 }
 
-impl HttpClient {
-    fn post(&self, body: &Value) -> reqwest::RequestBuilder {
-        let mut builder = self
-            .http
-            .post(&self.url)
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream")
-            .header("mcp-protocol-version", PROTOCOL_VERSION)
-            .json(body);
-        for (name, value) in &self.headers {
-            builder = builder.header(name, value);
-        }
-        if let Some(session) = self.session.lock().unwrap().clone() {
-            builder = builder.header("mcp-session-id", session);
-        }
-        builder
-    }
-
-    /// Sends, retrying once when the request never reached the server (a pooled
-    /// keep-alive connection the server had already closed).
-    async fn send(&self, body: &Value) -> anyhow::Result<reqwest::Response> {
-        match self.post(body).send().await {
-            Err(error) if error.is_request() || error.is_connect() => {
-                Ok(self.post(body).send().await?)
-            }
-            result => Ok(result?),
-        }
-    }
-
-    async fn request(&self, method: &str, params: Value) -> anyhow::Result<Value> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let response = self.send(&body).await?;
-        if let Some(session) = response
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok())
-        {
-            *self.session.lock().unwrap() = Some(session.to_owned());
-        }
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            bail!("the server needs authorization: add an Authorization header to its config");
-        }
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            bail!(
-                "HTTP {status}: {}",
-                body.chars().take(300).collect::<String>()
-            );
-        }
-        let is_sse = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.contains("event-stream"));
-        if !is_sse {
-            return rpc_result(&response.json::<Value>().await?);
-        }
-        // A stream: the reply is the message carrying our id.
-        let mut reader = SseReader::new(response);
-        while let Some(event) = reader.next().await? {
-            if let Ok(message) = serde_json::from_str::<Value>(&event.data)
-                && message["id"].as_u64() == Some(id)
-            {
-                return rpc_result(&message);
-            }
-        }
-        bail!("the stream ended without a reply")
-    }
-
-    async fn notify(&self, method: &str, params: Value) -> anyhow::Result<()> {
-        let response = self
-            .send(&json!({"jsonrpc": "2.0", "method": method, "params": params}))
-            .await?;
-        if !response.status().is_success() {
-            bail!("HTTP {}", response.status());
-        }
-        Ok(())
+/// The authorization saved for a server by an earlier sign-in, if any.
+async fn stored_authorization(url: &str) -> Option<AuthorizationManager> {
+    config::load_mcp_oauth(&credentials_file().ok()?, url)?;
+    let mut manager = AuthorizationManager::new(url).await.ok()?;
+    manager.set_credential_store(FileStore {
+        url: url.to_owned(),
+    });
+    match manager.initialize_from_store().await {
+        Ok(true) => Some(manager),
+        _ => None,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests;
 
-    #[test]
-    fn names_and_expansion() {
-        assert_eq!(
-            exposed_name("git hub", "create.issue"),
-            "mcp__git_hub__create_issue"
-        );
-        assert!(exposed_name("s", &"x".repeat(100)).len() <= 64);
-        // SAFETY: only this test touches the variable.
-        unsafe { std::env::set_var("CRACK_TEST_TOKEN", "abc") };
-        assert_eq!(expand("Bearer ${CRACK_TEST_TOKEN}"), "Bearer abc");
-        assert_eq!(expand("${CRACK_MISSING:-fallback}/x"), "fallback/x");
+/// rmcp's transport errors spell out its internal types; keep the part a person needs.
+fn readable(error: &str) -> String {
+    if let Some(start) = error.find("error sending request for url (") {
+        let rest = &error[start + "error sending request for url (".len()..];
+        let url = rest.split(')').next().unwrap_or(rest);
+        return format!("can't reach {url} (is the server running?)");
+    }
+    match error.rfind("] error: ") {
+        Some(i) => error[i + "] error: ".len()..].to_owned(),
+        None => error.to_owned(),
     }
 }

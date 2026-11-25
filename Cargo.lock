@@ -1245,6 +1245,8 @@ name = "crack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "dirs 5.0.1",
@@ -1280,6 +1282,7 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "url",
  "uuid",
 ]
 

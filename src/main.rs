@@ -66,6 +66,7 @@ enum Mode {
     },
     Mcp {
         common: Common,
+        args: Vec<String>,
     },
     Hooks {
         common: Common,
@@ -304,12 +305,13 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                 })
                 .build(),
             CommandBuilder::new("mcp")
-                .short("Connect the configured MCP servers and list their tools")
+                .short("List MCP servers and what they offer; `crack mcp login|logout <server>` for OAuth")
                 .run(move |ctx| {
                     set(
                         &mcp_mode,
                         Mode::Mcp {
                             common: common(ctx)?,
+                            args: ctx.args().to_vec(),
                         },
                     );
                     Ok(())
@@ -527,8 +529,37 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
             }
             Ok(0)
         }
-        Mode::Mcp { common } => {
+        Mode::Mcp { common, args } => {
             let (workspace, _) = load_workspace(&common)?;
+            match (args.first().map(String::as_str), args.get(1)) {
+                (Some("login"), Some(name)) => {
+                    let hub = workspace.mcp.clone();
+                    runtime::block_on(hub.sign_in(name, |url| {
+                        println!("Open this link to sign in to {name}:\n\n  {url}\n");
+                        let _ = std::process::Command::new("xdg-open")
+                            .arg(&url)
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn();
+                    }))?;
+                    let status = hub
+                        .snapshot()
+                        .into_iter()
+                        .find(|s| &s.name == name)
+                        .map(|s| s.status);
+                    println!("Signed in. {name}: {status:?}");
+                    return Ok(0);
+                }
+                (Some("logout"), Some(name)) => {
+                    workspace.mcp.sign_out(name)?;
+                    println!("Forgot the sign-in for {name}.");
+                    return Ok(0);
+                }
+                (Some(other), _) => anyhow::bail!(
+                    "unknown: crack mcp {other} (try `crack mcp`, `crack mcp login <server>` or `crack mcp logout <server>`)"
+                ),
+                (None, _) => {}
+            }
             if workspace.mcp.is_empty() {
                 println!(
                     "No MCP servers configured. Add [mcp.<name>] to ~/.config/crack/config.toml or a .mcp.json to the project."
@@ -540,7 +571,14 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
             let mut failed = false;
             for server in workspace.mcp.snapshot() {
                 let status = match &server.status {
-                    mcp::Status::Connected => format!("connected, {} tools", server.tools),
+                    mcp::Status::Connected => format!(
+                        "connected, {} tools, {} resources, {} prompts",
+                        server.tools, server.resources, server.prompts
+                    ),
+                    mcp::Status::NeedsAuth => {
+                        failed = true;
+                        format!("needs sign-in: crack mcp login {}", server.name)
+                    }
                     mcp::Status::Failed(why) => {
                         failed = true;
                         format!("failed: {why}")
@@ -555,6 +593,21 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
                         tool.exposed,
                         tool.description.lines().next().unwrap_or("")
                     );
+                }
+                for resource in workspace.mcp.resources() {
+                    if resource.server == server.name {
+                        let reference = format!("@{}:{}", server.name, resource.uri);
+                        println!("  {reference:<40} {}", resource.name);
+                    }
+                }
+                for prompt in workspace.mcp.prompts() {
+                    if prompt.server == server.name {
+                        let command = format!("/{}", prompt.command());
+                        println!(
+                            "  {command:<40} {}",
+                            prompt.description.lines().next().unwrap_or("")
+                        );
+                    }
                 }
             }
             Ok(if failed { 1 } else { 0 })

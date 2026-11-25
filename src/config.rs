@@ -418,6 +418,34 @@ pub fn forget_provider(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// OAuth credentials for an MCP server (by URL), as rmcp's JSON, from the
+/// credentials file's `[mcp_oauth]` table.
+pub fn load_mcp_oauth(path: &Path, url: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    doc.get("mcp_oauth")?.get(url)?.as_str().map(str::to_owned)
+}
+
+/// Saves (or with `None`, forgets) an MCP server's OAuth credentials.
+pub fn save_mcp_oauth(path: &Path, url: &str, json: Option<&str>) -> anyhow::Result<()> {
+    let mut doc = read_doc(path)?;
+    if !doc.contains_key("mcp_oauth") {
+        doc["mcp_oauth"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let table = doc["mcp_oauth"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("`mcp_oauth` in {} is not a table", path.display()))?;
+    match json {
+        Some(json) => {
+            table.insert(url, toml_edit::value(json));
+        }
+        None => {
+            table.remove(url);
+        }
+    }
+    write_private(path, &doc.to_string())
+}
+
 /// Adds a permission rule to the project's config (`.crack/config.toml`, or an
 /// existing `crack.toml`), for "always allow".
 pub fn add_permission_rule(cwd: &Path, list: &str, rule: &str) -> anyhow::Result<PathBuf> {
