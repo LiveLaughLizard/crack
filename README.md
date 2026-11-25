@@ -54,6 +54,10 @@ Each archive holds the `crack` binary, `LICENSE`, `README.md`, `THIRD-PARTY-NOTI
 desktop entry and the icon. `SHA256SUMS` lists the checksums. Unpack it and put `crack`
 on your PATH. To get a launcher entry, copy `share/` into `~/.local/share/`.
 
+There is also an AppImage per build type (`crack-<version>-<build>-<arch>.AppImage`):
+`chmod +x` it and run it. It carries its own copies of the window libraries but uses
+your system's graphics driver.
+
 The binary needs the usual desktop libraries: Wayland or X11 (`libxkbcommon`), Vulkan
 (`libvulkan1`), fontconfig and freetype.
 

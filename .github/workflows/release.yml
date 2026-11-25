@@ -34,7 +34,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config cmake clang \
+            pkg-config cmake clang file \
             libfontconfig-dev libfreetype-dev \
             libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-xcb-dev libxcb1-dev
@@ -64,10 +64,15 @@ jobs:
       - name: Package
         run: just archive ${{ matrix.flavor }}
 
+      - name: AppImage
+        run: just appimage ${{ matrix.flavor }}
+
       - uses: actions/upload-artifact@v4
         with:
           name: crack-${{ matrix.flavor }}-${{ matrix.arch }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.AppImage
           if-no-files-found: error
 
   release:
@@ -83,11 +88,12 @@ jobs:
           merge-multiple: true
 
       - name: Checksums
-        run: cd dist && sha256sum *.tar.gz > SHA256SUMS
+        run: cd dist && sha256sum *.tar.gz *.AppImage > SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
+            dist/*.AppImage
             dist/SHA256SUMS
           generate_release_notes: true

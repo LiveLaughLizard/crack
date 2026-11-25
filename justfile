@@ -129,6 +129,37 @@ archive flavor="default": notices
     tar -C dist -czf "dist/$name.tar.gz" "$name"
     echo "dist/$name.tar.gz"
 
+# Build an AppImage of a built flavor: dist/crack-<version>-<flavor>-<arch>.AppImage.
+# Downloads linuxdeploy on first use; runs without FUSE (extract-and-run).
+appimage flavor="default":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{flavor}}" in
+        default) bin=target/release/crack ;;
+        no-china|airgap|strict) bin=target/{{flavor}}/release/crack ;;
+        *) echo "unknown flavor {{flavor}} (default, no-china, airgap, strict)" >&2; exit 1 ;;
+    esac
+    arch=$(uname -m)
+    tool="target/linuxdeploy-$arch.AppImage"
+    if [ ! -x "$tool" ]; then
+        curl -fsSL -o "$tool" "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$arch.AppImage"
+        chmod +x "$tool"
+    fi
+    appdir="target/AppDir-{{flavor}}"
+    rm -rf "$appdir"
+    # The window opens these at run time rather than linking them, so name them.
+    extra=()
+    for lib in libxkbcommon.so.0 libxkbcommon-x11.so.0 libwayland-client.so.0 libwayland-cursor.so.0 libfontconfig.so.1 libfreetype.so.6; do
+        path=$(ldconfig -p | awk -v l="$lib" '$1 == l { print $NF; exit }')
+        [ -n "$path" ] && extra+=(--library "$path")
+    done
+    mkdir -p dist
+    APPIMAGE_EXTRACT_AND_RUN=1 ARCH=$arch LDAI_OUTPUT="dist/crack-{{version}}-{{flavor}}-$arch.AppImage" \
+        "$tool" --appdir "$appdir" --executable "$bin" \
+        --desktop-file packaging/crack.desktop --icon-file assets/icon-512.png --icon-filename crack \
+        "${extra[@]}" --output appimage
+    echo "dist/crack-{{version}}-{{flavor}}-$arch.AppImage"
+
 # Build the Nix package (all providers); `just package airgap` for another flavor
 package flavor="default":
     nix build .#{{flavor}}
