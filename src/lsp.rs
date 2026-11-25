@@ -115,6 +115,9 @@ struct Client {
     /// rust-analyzer says when it's done loading (`experimental/serverStatus`).
     quiescent: std::sync::atomic::AtomicBool,
     progressed: Notify,
+    /// Whether the server has said anything about its state yet (progress, status or
+    /// diagnostics). Until it has, a quiet moment doesn't mean it's done loading.
+    reported: std::sync::atomic::AtomicBool,
     _child: Mutex<tokio::process::Child>,
 }
 
@@ -161,6 +164,7 @@ impl Client {
             // Servers without status notices count as ready once initialized.
             quiescent: std::sync::atomic::AtomicBool::new(spec.name != "rust-analyzer"),
             progressed: Notify::new(),
+            reported: std::sync::atomic::AtomicBool::new(false),
             _child: Mutex::new(child),
         });
         let reader = client.clone();
@@ -286,11 +290,13 @@ impl Client {
                     }
                     _ => {}
                 }
+                self.reported.store(true, Ordering::Relaxed);
                 self.progressed.notify_waiters();
             }
             (None, Some("experimental/serverStatus")) => {
                 let quiescent = message["params"]["quiescent"].as_bool().unwrap_or(true);
                 self.quiescent.store(quiescent, Ordering::Relaxed);
+                self.reported.store(true, Ordering::Relaxed);
                 self.progressed.notify_waiters();
             }
             (None, Some("textDocument/publishDiagnostics")) => {
@@ -305,6 +311,8 @@ impl Client {
                         .unwrap()
                         .insert(uri.to_owned(), list);
                     self.published.notify_waiters();
+                    self.reported.store(true, Ordering::Relaxed);
+                    self.progressed.notify_waiters();
                 }
             }
             _ => {}
@@ -319,8 +327,15 @@ impl Client {
             let ready =
                 self.quiescent.load(Ordering::Relaxed) && self.busy.lock().unwrap().is_empty();
             if ready {
-                // Settle briefly: servers often start the next job right away.
-                let settle = tokio::time::Instant::now() + Duration::from_millis(300);
+                // Settle briefly: servers often start the next job right away. A server that
+                // hasn't reported anything yet may not have started loading (TypeScript
+                // starts its project a moment after the first open), so give it longer.
+                let settle_for = if self.reported.load(Ordering::Relaxed) {
+                    Duration::from_millis(300)
+                } else {
+                    Duration::from_secs(3)
+                };
+                let settle = tokio::time::Instant::now() + settle_for;
                 if tokio::time::timeout_at(settle.min(deadline), notified)
                     .await
                     .is_err()
