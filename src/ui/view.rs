@@ -93,6 +93,11 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
         "Show every file change in this session",
         &["changes"],
     ),
+    (
+        "trust-hooks",
+        "Trust project hooks: let this project's hooks run",
+        &[],
+    ),
     ("close", "Close this tab", &["closetab"]),
     ("help", "Keybindings", &[]),
     ("exit", "Quit", &["quit", "q"]),
@@ -143,6 +148,8 @@ pub struct CrackView {
     pub(super) rewind_target: Option<usize>,
     pub(super) redo: Option<super::undo::Redo>,
     pub(super) diff_view: Option<super::undo::DiffView>,
+    /// Told the user about untrusted project hooks this run.
+    pub(super) hooks_warned: bool,
     recent_models: Vec<String>,
     pub(super) discovering: bool,
     /// The window title last set; updated when the session or directory changes.
@@ -230,6 +237,7 @@ impl CrackView {
             rewind_target: None,
             redo: None,
             diff_view: None,
+            hooks_warned: false,
             recent_models,
             discovering: false,
             window_title: String::new(),
@@ -542,6 +550,24 @@ impl CrackView {
             Some("undo") => self.undo(window, cx),
             Some("redo") => self.redo(cx),
             Some("diff") => self.show_session_diff(cx),
+            Some("trust-hooks") => {
+                let hooks = crate::hooks::Hooks::new(&self.ws.config.hooks, &self.ws.cwd, "");
+                let untrusted = hooks.untrusted();
+                if untrusted.is_empty() {
+                    self.show_toast("No untrusted project hooks.", false, cx);
+                } else {
+                    crate::hooks::trust(&self.ws.config.hooks, &self.ws.cwd);
+                    self.show_toast(
+                        format!(
+                            "Trusted {} project hook(s): {}",
+                            untrusted.len(),
+                            untrusted.join("; ")
+                        ),
+                        false,
+                        cx,
+                    );
+                }
+            }
             Some("close") => {
                 let id = self.tab_id;
                 self.close_tab(id, window, cx)
@@ -610,6 +636,15 @@ impl CrackView {
         let config = match self.ws.turn_config(&self.selection) {
             Ok(mut config) => {
                 config.context_tokens = self.session.context_tokens;
+                config.hooks.set_session(&self.session.id);
+                if !config.hooks.untrusted().is_empty() && !self.hooks_warned {
+                    self.hooks_warned = true;
+                    self.show_toast(
+                        "This project has hooks that won't run until you trust them: ctrl-p \u{2192} Trust project hooks",
+                        true,
+                        cx,
+                    );
+                }
                 config
             }
             Err(error) => {
@@ -1149,7 +1184,8 @@ impl CrackView {
         let group = |name: &str| match name {
             "new" | "sessions" | "rename" | "copy" | "tab" | "close" => "Session",
             "models" | "effort" | "agents" | "connect" => "Agent",
-            "skills" | "init" | "reload" | "cd" | "compact" | "undo" | "redo" | "diff" => "Project",
+            "skills" | "init" | "reload" | "cd" | "compact" | "undo" | "redo" | "diff"
+            | "trust-hooks" => "Project",
             "yolo" | "accept-edits" | "normal" | "sandbox" | "sandbox-network" => "Safety",
             _ => "System",
         };

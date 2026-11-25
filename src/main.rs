@@ -8,6 +8,7 @@ mod checkpoint;
 mod config;
 mod context;
 mod headless;
+mod hooks;
 mod mcp;
 mod policy;
 mod providers;
@@ -60,6 +61,10 @@ enum Mode {
     },
     Mcp {
         common: Common,
+    },
+    Hooks {
+        common: Common,
+        trust: bool,
     },
     Completion(Shell),
 }
@@ -133,6 +138,7 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
     let skills_mode = mode.clone();
     let sessions_mode = mode.clone();
     let mcp_mode = mode.clone();
+    let hooks_mode = mode.clone();
     let completion_mode = mode.clone();
 
     CommandBuilder::new("crack")
@@ -299,6 +305,28 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                         &mcp_mode,
                         Mode::Mcp {
                             common: common(ctx)?,
+                        },
+                    );
+                    Ok(())
+                })
+                .build(),
+            CommandBuilder::new("hooks")
+                .short("List the configured hooks; `crack hooks trust` allows this project's")
+                .run(move |ctx| {
+                    let trust = match ctx.args().first().map(String::as_str) {
+                        None => false,
+                        Some("trust") => true,
+                        Some(other) => {
+                            return Err(flag_rs::Error::Validation(format!(
+                                "unknown hooks command '{other}' (try `crack hooks trust`)"
+                            )));
+                        }
+                    };
+                    set(
+                        &hooks_mode,
+                        Mode::Hooks {
+                            common: common(ctx)?,
+                            trust,
                         },
                     );
                     Ok(())
@@ -525,6 +553,46 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
                 }
             }
             Ok(if failed { 1 } else { 0 })
+        }
+        Mode::Hooks { common, trust } => {
+            let (workspace, _) = load_workspace(&common)?;
+            let config = &workspace.config.hooks;
+            if config.values().all(Vec::is_empty) {
+                println!("No hooks configured. Add them as [[hooks.EVENT]] in crack's config.");
+                return Ok(0);
+            }
+            if trust {
+                hooks::trust(config, &workspace.cwd);
+                store::get().flush();
+                println!("Trusted this project's hooks (until they change).");
+                return Ok(0);
+            }
+            let hooks = hooks::Hooks::new(config, &workspace.cwd, "");
+            for (event, matchers) in config {
+                for m in matchers {
+                    let source = match (m.from_project, hooks.project_trusted) {
+                        (false, _) => "user",
+                        (true, true) => "project, trusted",
+                        (true, false) => "project, NOT trusted",
+                    };
+                    let commands: Vec<&str> = m
+                        .command
+                        .iter()
+                        .map(String::as_str)
+                        .chain(m.hooks.iter().map(|h| h.command.as_str()))
+                        .collect();
+                    let matcher = m.matcher.as_deref().unwrap_or("*");
+                    for command in commands {
+                        println!("{event:<17} {matcher:<14} {command}   ({source})");
+                    }
+                }
+            }
+            if !hooks.untrusted().is_empty() {
+                println!(
+                    "\nThis project's hooks won't run until you trust them: crack hooks trust"
+                );
+            }
+            Ok(0)
         }
         Mode::Sessions { common } => {
             let (workspace, _) = load_workspace(&common)?;

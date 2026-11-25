@@ -5,7 +5,7 @@ use crate::providers::{
     ChatRequest, Effort, Endpoint, Message, Part, Role, StopReason, StreamEvent, Usage,
 };
 use crate::tools::{self, Agent, ToolContext, ToolMeta};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 
@@ -47,6 +47,10 @@ pub enum AgentEvent {
         after: String,
         files: Vec<(char, String)>,
     },
+    /// A UserPromptSubmit hook blocked the prompt; take it back out.
+    PromptBlocked(String),
+    /// Hooks added context to the user's message.
+    UserContext(String),
     /// The history was replaced by a summary to make room.
     Compacted {
         messages: Vec<Message>,
@@ -62,6 +66,8 @@ pub enum AgentEvent {
 #[derive(Clone)]
 pub struct TurnConfig {
     pub endpoint: Endpoint,
+    /// The user's hooks (`[[hooks.*]]`), with the session id set.
+    pub hooks: crate::hooks::Hooks,
     pub model: String,
     pub system: String,
     pub effort: Effort,
@@ -172,6 +178,37 @@ async fn turn_loop(
     let mut context = config.context_tokens;
     let mut compact_failed = false;
     let mut just_compacted = false;
+    let mut stop_continuations = 0;
+
+    // Hooks for the start of a session and for the prompt.
+    let prompt = history.last().map(|m| m.text()).unwrap_or_default();
+    let mut added = Vec::new();
+    if history.len() == 1 {
+        let outcome = config
+            .hooks
+            .run("SessionStart", None, json!({"source": "startup"}))
+            .await;
+        notify(events, &outcome.notices);
+        added.extend(outcome.context);
+    }
+    let outcome = config
+        .hooks
+        .run("UserPromptSubmit", None, json!({"prompt": prompt}))
+        .await;
+    notify(events, &outcome.notices);
+    if let Some(reason) = outcome.block.or(outcome.stop) {
+        let _ = events.send(AgentEvent::PromptBlocked(reason));
+        return Ok(());
+    }
+    added.extend(outcome.context);
+    if !added.is_empty() {
+        let text = added.join("\n\n");
+        if let Some(last) = history.last_mut() {
+            last.parts.push(Part::Text { text: text.clone() });
+        }
+        let _ = events.send(AgentEvent::UserContext(text));
+    }
+
     loop {
         // Make room before the conversation outgrows the context window.
         if let Some(window) = config.context_window
@@ -179,6 +216,11 @@ async fn turn_loop(
             && history.len() > 1
             && !compact_failed
         {
+            let outcome = config
+                .hooks
+                .run("PreCompact", None, json!({"trigger": "auto"}))
+                .await;
+            notify(events, &outcome.notices);
             match compact(config, history, &client).await {
                 Ok(summary) => {
                     let _ = events.send(AgentEvent::Compacted {
@@ -279,7 +321,27 @@ async fn turn_loop(
             })
             .collect();
         if calls.is_empty() {
-            return Ok(());
+            // A Stop hook can send the model back to work (a few times at most).
+            let outcome = config
+                .hooks
+                .run(
+                    "Stop",
+                    None,
+                    json!({"stop_hook_active": stop_continuations > 0}),
+                )
+                .await;
+            notify(events, &outcome.notices);
+            match outcome.block {
+                Some(reason) if stop_continuations < 3 && outcome.stop.is_none() => {
+                    stop_continuations += 1;
+                    let message =
+                        Message::user_text(format!("A Stop hook asked you to continue: {reason}"));
+                    history.push(message.clone());
+                    let _ = events.send(AgentEvent::Message(message));
+                    continue;
+                }
+                _ => return Ok(()),
+            }
         }
         // Truncated tool input can't be trusted; ask for the call again.
         if completion.stop == StopReason::MaxTokens {
@@ -300,6 +362,7 @@ async fn turn_loop(
             continue;
         }
 
+        let mut stop_after_tools = false;
         let mut results = Vec::new();
         for (id, name, input) in calls {
             let _ = events.send(AgentEvent::ToolCall {
@@ -307,10 +370,59 @@ async fn turn_loop(
                 name: name.clone(),
                 input: input.clone(),
             });
-            let output = match permit(config, &id, &name, &input, events).await {
-                Ok(()) => tools::run(&name, &input, ctx, config.agent).await,
-                Err(refusal) => refusal,
+            let mut input = input;
+            let tool_input = crate::hooks::claude_input(&input);
+            let pre = config
+                .hooks
+                .run(
+                    "PreToolUse",
+                    Some(&name),
+                    json!({"tool_input": tool_input, "permission_mode": config.policy.mode.label()}),
+                )
+                .await;
+            notify(events, &pre.notices);
+            if let Some(updated) = &pre.updated_input {
+                input = crate::hooks::crack_input(updated);
+            }
+            let blocked = pre.block.is_some();
+            let mut output = if let Some(reason) = pre.block {
+                tools::ToolOutput::refused(
+                    format!("Blocked by a hook: {reason}"),
+                    tools::title(&name, &input),
+                )
+            } else {
+                match permit(config, &id, &name, &input, events, pre.permission).await {
+                    Ok(()) => tools::run(&name, &input, ctx, config.agent).await,
+                    Err(refusal) => refusal,
+                }
             };
+            // Like Claude Code, PostToolUse runs only for tools that ran.
+            let post = if blocked {
+                crate::hooks::Outcome::default()
+            } else {
+                config
+                .hooks
+                .run(
+                    "PostToolUse",
+                    Some(&name),
+                    json!({
+                        "tool_input": crate::hooks::claude_input(&input),
+                        "tool_response": {"output": output.content, "is_error": output.is_error},
+                    }),
+                )
+                .await
+            };
+            notify(events, &post.notices);
+            // What hooks say after a tool goes to the model with its result.
+            for note in post.block.iter().chain(&post.context) {
+                output.content.push_str(&format!("\n\n[hook] {note}"));
+            }
+            if let Some(reason) = pre.stop.or(post.stop) {
+                let _ = events.send(AgentEvent::Notice(format!(
+                    "A hook ended the turn: {reason}"
+                )));
+                stop_after_tools = true;
+            }
             let _ = events.send(AgentEvent::ToolResult {
                 id: id.clone(),
                 is_error: output.is_error,
@@ -330,6 +442,9 @@ async fn turn_loop(
         };
         history.push(message.clone());
         let _ = events.send(AgentEvent::Message(message));
+        if stop_after_tools {
+            return Ok(());
+        }
     }
 }
 
@@ -341,6 +456,7 @@ async fn permit(
     name: &str,
     input: &Value,
     events: &Events,
+    hook: Option<crate::hooks::Permission>,
 ) -> Result<(), tools::ToolOutput> {
     use crate::policy::{Answer, Decision};
     let rules = config.session_rules.lock().unwrap().clone();
@@ -349,6 +465,15 @@ async fn permit(
         .clone()
         .with_session_rules(&rules)
         .check(name, input);
+    // A PreToolUse hook can answer the question (allow) or insist on one (ask);
+    // deny rules still win.
+    let decision = match (decision, hook) {
+        (Decision::Ask(_), Some(crate::hooks::Permission::Allow)) => Decision::Allow,
+        (Decision::Allow, Some(crate::hooks::Permission::Ask)) => {
+            Decision::Ask("a hook asked for confirmation".into())
+        }
+        (decision, _) => decision,
+    };
     let title = tools::title(name, input);
     let refuse = |text: String| tools::ToolOutput::refused(text, title.clone());
     match decision {
@@ -366,6 +491,14 @@ async fn permit(
             };
             let suggestion =
                 crate::policy::suggest_rule(name, input, &config.policy.root, &config.policy.cwd);
+            // Notification hooks run alongside, without holding up the question.
+            let hooks = config.hooks.clone();
+            let message = format!("crack needs your permission: {}", tools::title(name, input));
+            tokio::spawn(async move {
+                hooks
+                    .run("Notification", None, json!({"message": message}))
+                    .await;
+            });
             let (respond, answer) = tokio::sync::oneshot::channel();
             let _ = events.send(AgentEvent::Approval {
                 id: id.to_owned(),
@@ -477,4 +610,11 @@ pub async fn compact(
     Ok(vec![Message::user_text(format!(
         "This conversation was compacted to save context. Summary of everything so far:\n\n{summary}\n\n{next}"
     ))])
+}
+
+/// Shows hook output in the transcript.
+fn notify(events: &Events, notices: &[String]) {
+    for notice in notices {
+        let _ = events.send(AgentEvent::Notice(notice.clone()));
+    }
 }

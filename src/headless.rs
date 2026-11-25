@@ -116,6 +116,14 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
         };
         session.push_user(&shown, model_text, selection.agent, skill);
         config.context_tokens = session.context_tokens;
+        config.hooks.set_session(&session.id);
+        let untrusted = config.hooks.untrusted();
+        if !untrusted.is_empty() {
+            eprintln!(
+                "warning: this project defines hooks that won't run until trusted ({}); run `crack hooks trust`",
+                untrusted.join("; ")
+            );
+        }
 
         let todos: Arc<Mutex<Vec<Todo>>> = Arc::new(Mutex::new(session.todos.clone()));
         let tools = workspace.tool_context(&session.id, todos.clone(), options.tools.clone());
@@ -170,6 +178,11 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
                         }),
                         AgentEvent::Usage(u) => json!({"type": "usage", "usage": u}),
                         AgentEvent::Notice(t) => json!({"type": "notice", "text": t}),
+                        AgentEvent::PromptBlocked(reason) => {
+                            failed = true;
+                            json!({"type": "error", "text": format!("A hook blocked this prompt: {reason}")})
+                        }
+                        AgentEvent::UserContext(_) => continue,
                         AgentEvent::Checkpoint { files, .. } => {
                             json!({"type": "files_changed", "files": files.iter().map(|(s, p)| json!({"status": s.to_string(), "path": p})).collect::<Vec<_>>()})
                         }

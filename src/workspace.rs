@@ -108,6 +108,7 @@ impl Workspace {
         .render();
         Ok(TurnConfig {
             endpoint: provider.endpoint.clone(),
+            hooks: crate::hooks::Hooks::new(&self.config.hooks, &self.cwd, ""),
             model,
             system,
             effort: selection.effort,

@@ -301,6 +301,26 @@ impl Session {
                     ),
                 });
             }
+            AgentEvent::PromptBlocked(reason) => {
+                // Take the prompt back out, as if it was never sent.
+                if let Some((messages, entries, _)) = self.turn_start.take() {
+                    self.messages.truncate(messages);
+                    self.entries.truncate(entries);
+                    self.saved_messages = self.saved_messages.min(messages);
+                    self.dirty_from = self.dirty_from.min(entries);
+                }
+                self.entries.push(Entry::Error {
+                    text: format!("A hook blocked this prompt: {reason}"),
+                });
+            }
+            AgentEvent::UserContext(text) => {
+                if let Some(last) = self.messages.last_mut() {
+                    last.parts
+                        .push(crate::providers::Part::Text { text: text.clone() });
+                    let index = self.messages.len() - 1;
+                    self.saved_messages = self.saved_messages.min(index);
+                }
+            }
             AgentEvent::Checkpoint {
                 before,
                 after,

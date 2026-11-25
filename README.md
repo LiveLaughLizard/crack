@@ -213,6 +213,47 @@ crack leaves it alone and shows you the diff. Snapshots need `git` on PATH; set
 `checkpoints = false` to turn them off. `crack run --format json` reports a
 `files_changed` event per turn.
 
+## Hooks
+
+Hooks run your commands at points in a turn. They use Claude Code's format and contract,
+so existing hook scripts work unchanged:
+
+```toml
+[[hooks.PostToolUse]]
+matcher = "Edit|Write"            # regex on the tool name (Claude Code's names: Bash, Edit, …)
+command = "cargo fmt"
+
+[[hooks.PreToolUse]]
+matcher = "Bash"
+hooks = [{ type = "command", command = "./scripts/check-command.sh", timeout = 10 }]
+
+[[hooks.UserPromptSubmit]]
+command = "jq -r .prompt >> ~/.crack-prompts.log"
+```
+
+**Events:** `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`,
+`Stop` and `Notification` (approval needed).
+
+**Input:** each hook gets the event as JSON on stdin: `hook_event_name`, `session_id`,
+`cwd`, `tool_name`, `tool_input`, `tool_response` and `prompt`.
+
+**Exit codes:**
+- **0** continues;
+- **2** blocks, with stderr as the reason: the tool doesn't run, the prompt isn't sent,
+  or (for `Stop`) the model keeps working;
+- **anything else** is a warning shown in the transcript.
+
+**JSON answers.** A JSON answer on stdout can:
+- allow, deny or ask (`hookSpecificOutput.permissionDecision`);
+- rewrite the tool input (`updatedInput`);
+- add context for the model (`additionalContext`, or plain stdout for
+  `UserPromptSubmit` and `SessionStart`);
+- end the turn (`"continue": false`).
+
+Hooks run in parallel with a 60-second timeout. Hooks from a project's own config don't run
+until you trust them, by running `crack hooks trust` or from the command palette. `crack
+hooks` lists them all.
+
 ## Built-in ripgrep
 
 The `grep` tool uses ripgrep's own search engine, so searches respect `.gitignore`,

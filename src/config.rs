@@ -32,6 +32,8 @@ pub struct Config {
     pub compact_at: Option<f64>,
     /// Snapshot files around each turn for undo (default true).
     pub checkpoints: Option<bool>,
+    /// Commands run at points in a turn, in Claude Code's format (`[[hooks.PreToolUse]]`).
+    pub hooks: crate::hooks::HooksConfig,
     /// MCP servers, keyed by name: `command` + `args` (stdio) or `url` (HTTP).
     pub mcp: BTreeMap<String, crate::mcp::McpServerConfig>,
     /// Provider settings, keyed by provider id. Ids that match a built-in provider
@@ -129,16 +131,22 @@ impl Config {
         if let Some(global) = global_dir() {
             files.push(global.join("config.toml"));
         }
-        if let Some(project) = project_config(cwd) {
-            files.push(project);
+        let project_file = project_config(cwd);
+        if let Some(project) = &project_file {
+            files.push(project.clone());
         }
         for file in files {
             if !file.is_file() {
                 continue;
             }
             let text = std::fs::read_to_string(&file)?;
-            let layer: Config =
+            let mut layer: Config =
                 toml::from_str(&text).map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
+            if project_file.as_ref() == Some(&file) {
+                for hook in layer.hooks.values_mut().flatten() {
+                    hook.from_project = true;
+                }
+            }
             config.overlay(layer);
         }
         // Keys saved from the Providers dialog.
@@ -177,6 +185,9 @@ impl Config {
         }
         if layer.checkpoints.is_some() {
             self.checkpoints = layer.checkpoints;
+        }
+        for (event, hooks) in layer.hooks {
+            self.hooks.entry(event).or_default().extend(hooks);
         }
         // Project rules add to global ones; settings override.
         let p = layer.permissions;
