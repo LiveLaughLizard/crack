@@ -106,7 +106,10 @@ impl Workspace {
             skills: &self.skills,
         }
         .render();
+        let model_ref = model_ref.to_owned();
         Ok(TurnConfig {
+            caps: self.registry.caps(&model_ref),
+            model_ref: model_ref.clone(),
             endpoint: provider.endpoint.clone(),
             hooks: crate::hooks::Hooks::new(&self.config.hooks, &self.cwd, ""),
             subagents: Some(std::sync::Arc::new(crate::delegate::SubagentEnv::new(
@@ -132,7 +135,7 @@ impl Workspace {
             ),
             session_rules: Default::default(),
             approvals: None,
-            context_window: self.registry.caps(model_ref).context,
+            context_window: self.registry.caps(&model_ref).context,
             compact_at: self.config.compact_at.unwrap_or(0.8).clamp(0.3, 0.95),
             context_tokens: 0,
         })
@@ -160,7 +163,7 @@ impl Workspace {
             loaded: Arc::new(Mutex::new(
                 self.instructions.iter().map(|i| i.path.clone()).collect(),
             )),
-            checkpoint: Arc::new(crate::checkpoint::Tracker::new(snapshots)),
+            checkpoint: Arc::new(crate::checkpoint::Tracker::new(snapshots).for_session(session)),
             lsp: self.config.lsp.unwrap_or(true),
             session_id: session.to_owned(),
             memory: self.config.memory.unwrap_or(true),

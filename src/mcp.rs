@@ -461,6 +461,7 @@ impl McpHub {
             }
             Err(Failure::NeedsAuth) => server.status = Status::NeedsAuth,
             Err(Failure::Other(error)) => {
+                tracing::warn!(server = name, error = %format!("{error:#}"), "MCP server failed to connect");
                 server.status = Status::Failed(readable(&format!("{error:#}")))
             }
         }

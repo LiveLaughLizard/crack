@@ -193,6 +193,27 @@ tab to switch to it. Close it with its ×, a middle-click or `ctrl-x w`; closing
 running tab stops its turn. Opening a session that's already in a tab switches to that
 tab.
 
+## Cost, logs and troubleshooting
+
+- **Cost.** Every model request is logged with its tokens and, when the model's price is
+  known, its cost. Subagents count toward their session. The sidebar shows what the
+  session has spent.
+  - `crack usage` (or `/usage`) totals the last 30 days by model and by day;
+    `crack usage 7` and `crack usage all` change the range and include every project.
+  - `crack run --max-cost 0.50` stops a headless run once it has cost 50 cents.
+  - Prices come from the built-in table or `[models."provider/model"] input_price = …`.
+- **Logs** go to `~/.local/state/crack/crack.<date>.log`, kept for a week.
+  - `CRACK_LOG=debug` gives more detail.
+  - `crack run --log info` also prints the log to stderr.
+  - Language servers log to `lsp-<name>.log` in the data folder.
+- **`crack doctor`** checks the data folders, providers (with a live test of the default
+  model), the sandbox, git, ripgrep, the font, language servers, MCP servers and untrusted
+  hooks, and says how to fix what's wrong.
+- **Crash recovery.** If crack is killed mid-turn, the session is kept. The next time you
+  open the project, crack repairs the unfinished turn: tool calls that never finished are
+  marked, and undo can restore the files it changed. It then offers to continue.
+  Headless runs repair a session automatically when you continue it with `-s`.
+
 ## Undo, redo and rewinding
 
 Before a turn first changes anything, crack snapshots the project's files, and it

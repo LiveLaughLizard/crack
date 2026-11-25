@@ -23,6 +23,8 @@ pub struct RunOptions {
     pub selection: Selection,
     pub format: Format,
     pub max_steps: Option<u32>,
+    /// Stop once the run has cost this many dollars.
+    pub max_cost: Option<f64>,
     pub tools: Option<Vec<String>>,
     /// `last`, or a session id to continue.
     pub session: Option<String>,
@@ -114,7 +116,14 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
             Some((text, name)) => (options.prompt.clone(), text, Some(name)),
             None => (options.prompt.clone(), options.prompt.clone(), None),
         };
+        // A session whose last turn never finished (crack was killed) is repaired first.
+        if crate::recovery::interrupted(&crate::memory::project_key(&workspace.cwd))
+            .contains(&session.id)
+        {
+            session = crate::recovery::repair(&session.id, &workspace.cwd)?;
+        }
         session.push_user(&shown, model_text, selection.agent, skill);
+        crate::recovery::mark_running(&session.id, &crate::memory::project_key(&workspace.cwd));
         config.context_tokens = session.context_tokens;
         config.hooks.set_session(&session.id);
         let untrusted = config.hooks.untrusted();
@@ -146,6 +155,8 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
             }
         };
         let mut at_line_start = true;
+        let mut spent = 0.0;
+        let mut over_budget = false;
 
         loop {
             let event = tokio::select! {
@@ -155,7 +166,30 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
                     continue;
                 }
             };
+            if let AgentEvent::Cost(cost) = &event {
+                spent += cost;
+                if let Some(max) = options.max_cost
+                    && spent > max
+                    && !over_budget
+                {
+                    over_budget = true;
+                    failed = true;
+                    let _ = cancel_tx.send(true);
+                    eprintln!(
+                        "crack: stopped: this run has cost ${spent:.2}, over --max-cost ${max:.2}"
+                    );
+                }
+            }
             session.apply(&event, selection.agent, &model_ref);
+            // Save as it goes, so a killed run keeps what it did (and can be repaired).
+            if matches!(
+                event,
+                AgentEvent::Message(_)
+                    | AgentEvent::ToolResult { .. }
+                    | AgentEvent::Checkpoint { .. }
+            ) {
+                let _ = session.save();
+            }
             match format {
                 Format::Json => {
                     let line = match &event {
@@ -183,7 +217,7 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
                             json!({"type": "error", "text": format!("A hook blocked this prompt: {reason}")})
                         }
                         AgentEvent::UserContext(_) => continue,
-                        AgentEvent::SubagentUsage(_) => continue,
+                        AgentEvent::SubagentUsage(_) | AgentEvent::Cost(_) => continue,
                         AgentEvent::SubagentStatus { id, text } => {
                             json!({"type": "subagent_status", "id": id, "text": text})
                         }
@@ -204,7 +238,7 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
                             interrupted = *i;
                             json!({
                                 "type": "done", "interrupted": i, "seconds": seconds,
-                                "session": session.id, "model": model_ref, "usage": session.usage,
+                                "session": session.id, "model": model_ref, "usage": session.usage, "cost": session.cost,
                                 "result": session.messages.iter().rev()
                                     .find(|m| m.role == crate::providers::Role::Assistant)
                                     .map(|m| m.text()).unwrap_or_default(),
@@ -256,6 +290,7 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
         }
         let _ = task.await;
         session.todos = todos.lock().unwrap().clone();
+        crate::recovery::clear(&session.id);
         if let Err(error) = session.save() {
             eprintln!("warning: could not save the session: {error}");
         }

@@ -54,6 +54,8 @@ pub enum AgentEvent {
     },
     /// Tokens a subagent used: counted in the session's cost, not its context.
     SubagentUsage(Usage),
+    /// What a request cost, in dollars (0 when the price isn't known).
+    Cost(f64),
     /// A UserPromptSubmit hook blocked the prompt; take it back out.
     PromptBlocked(String),
     /// Hooks added context to the user's message.
@@ -72,6 +74,10 @@ pub enum AgentEvent {
 
 #[derive(Clone)]
 pub struct TurnConfig {
+    /// `provider/model`, for the usage log.
+    pub model_ref: String,
+    /// Prices and limits for the model.
+    pub caps: crate::providers::models::ModelCaps,
     pub endpoint: Endpoint,
     /// The user's hooks (`[[hooks.*]]`), with the session id set.
     pub hooks: crate::hooks::Hooks,
@@ -119,6 +125,7 @@ pub async fn run_turn(
     mut cancel: watch::Receiver<bool>,
 ) {
     let started = Instant::now();
+    tracing::info!(model = %config.model_ref, agent = config.agent.name(), session = %tools.session_id, "turn started");
     let interrupted = tokio::select! {
         result = turn_loop(&config, &mut history, &tools, &events) => {
             if let Err(error) = result {
@@ -169,6 +176,11 @@ pub async fn run_turn(
             files,
         });
     }
+    tracing::info!(
+        interrupted,
+        seconds = started.elapsed().as_secs_f32(),
+        "turn finished"
+    );
     let _ = events.send(AgentEvent::Done {
         interrupted,
         seconds: started.elapsed().as_secs_f32(),
@@ -307,6 +319,7 @@ pub(crate) async fn turn_loop(
             .await?;
 
         let _ = events.send(AgentEvent::Usage(completion.usage));
+        record_usage(config, ctx, &completion.usage, events);
         context = completion.usage.context() + completion.usage.output_tokens;
         if just_compacted {
             just_compacted = false;
@@ -724,4 +737,12 @@ fn notify(events: &Events, notices: &[String]) {
     for notice in notices {
         let _ = events.send(AgentEvent::Notice(notice.clone()));
     }
+}
+
+/// Logs a request's tokens and cost, and reports the cost to the session.
+fn record_usage(config: &TurnConfig, ctx: &ToolContext, usage: &Usage, events: &Events) {
+    let cost = config.caps.cost(usage);
+    let project = crate::memory::project_key(&ctx.cwd);
+    crate::usage::get().record(&ctx.session_id, &project, &config.model_ref, usage, cost);
+    let _ = events.send(AgentEvent::Cost(cost.unwrap_or(0.0)));
 }

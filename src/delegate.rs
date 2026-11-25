@@ -167,6 +167,8 @@ pub async fn run(
         policy.cwd = w.path.clone();
     }
     let sub_config = TurnConfig {
+        model_ref: model_ref.clone(),
+        caps: env.registry.caps(&model_ref),
         hooks: config.hooks.clone(),
         endpoint: provider,
         model,
@@ -244,6 +246,9 @@ pub async fn run(
                 }
                 AgentEvent::Usage(usage) => {
                     let _ = events.send(AgentEvent::SubagentUsage(*usage));
+                }
+                AgentEvent::Cost(cost) => {
+                    let _ = events.send(AgentEvent::Cost(*cost));
                 }
                 _ => {}
             }

@@ -537,7 +537,7 @@ impl Hub {
                 Some((client, spec))
             }
             Err(error) => {
-                eprintln!("crack: {} didn't start: {error:#}", spec.name);
+                tracing::warn!(server = spec.name, error = %format!("{error:#}"), "language server didn't start");
                 self.status
                     .lock()
                     .unwrap()

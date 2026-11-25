@@ -43,6 +43,7 @@ pub enum PickerKind {
     Install,
     Memory,
     MemoryAction,
+    Recover,
 }
 
 pub enum PickerEvent {

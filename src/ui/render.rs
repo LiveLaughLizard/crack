@@ -1057,13 +1057,9 @@ impl CrackView {
             thousands(usage.output_tokens),
             thousands(usage.cache_read_tokens)
         ));
-        if let Some(cost) = self
-            .ws
-            .registry
-            .caps(self.selection.model.as_deref().unwrap_or(""))
-            .cost(&usage)
-        {
-            context_section = context_section.child(format!("${cost:.2} spent"));
+        // From the usage log: every request at its own model's price, subagents included.
+        if self.session.cost > 0.0 {
+            context_section = context_section.child(format!("${:.2} spent", self.session.cost));
         }
         column = column.child(context_section);
 

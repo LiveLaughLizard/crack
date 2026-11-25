@@ -74,6 +74,9 @@ pub struct Session {
     pub entries: Vec<Entry>,
     #[serde(default)]
     pub usage: Usage,
+    /// Dollars spent so far (from the usage log), when prices are known.
+    #[serde(skip)]
+    pub cost: f64,
     /// Tokens in the most recent request: how full the context is.
     #[serde(default)]
     pub context_tokens: u64,
@@ -124,6 +127,7 @@ impl Session {
             usage: Usage::default(),
             context_tokens: 0,
             todos: Vec::new(),
+            cost: 0.0,
             model: String::new(),
             saved_messages: 0,
             dirty_from: 0,
@@ -309,6 +313,7 @@ impl Session {
                 }
             }
             AgentEvent::SubagentUsage(usage) => self.usage.add(*usage),
+            AgentEvent::Cost(cost) => self.cost += cost,
             AgentEvent::PromptBlocked(reason) => {
                 // Take the prompt back out, as if it was never sent.
                 if let Some((messages, entries, _)) = self.turn_start.take() {
@@ -444,6 +449,100 @@ impl Session {
         self.dirty_from = self.entries.len();
     }
 
+    /// Cleans up a turn that never finished because crack stopped (a crash, a kill):
+    /// tools still running become failures, a tool call without a result gets one, so
+    /// the conversation can go on, and the turn gets an undo record when its starting
+    /// snapshot (`before`) is known.
+    pub fn repair_interrupted(&mut self, before: Option<crate::checkpoint::TurnChanges>) {
+        let Some(start) = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, Entry::User { .. }))
+        else {
+            return;
+        };
+        let mut pending = Vec::new();
+        for (index, entry) in self.entries.iter_mut().enumerate().skip(start) {
+            if let Entry::Tool {
+                state, meta, id, ..
+            } = entry
+                && matches!(
+                    state,
+                    ToolState::Pending | ToolState::Running | ToolState::Waiting
+                )
+            {
+                *state = ToolState::Error;
+                meta.detail = Some("crack closed before this finished".into());
+                pending.push(id.clone());
+                self.dirty_from = self.dirty_from.min(index);
+            }
+        }
+        // A tool call with no result makes the next request invalid.
+        if let Some(last) = self.messages.last()
+            && last.role == crate::providers::Role::Assistant
+        {
+            let results: Vec<crate::providers::Part> = last
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    crate::providers::Part::ToolUse { id, .. } => {
+                        Some(crate::providers::Part::ToolResult {
+                            id: id.clone(),
+                            content:
+                                "crack closed before this tool finished; it may have partly run."
+                                    .into(),
+                            is_error: true,
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !results.is_empty() {
+                self.messages.push(Message {
+                    role: crate::providers::Role::User,
+                    parts: results,
+                });
+            }
+        }
+        if let Some((before, after, files)) = before
+            && !files.is_empty()
+        {
+            let messages = self
+                .messages
+                .iter()
+                .rposition(|m| {
+                    m.role == crate::providers::Role::User
+                        && !m
+                            .parts
+                            .iter()
+                            .any(|p| matches!(p, crate::providers::Part::ToolResult { .. }))
+                })
+                .unwrap_or(0);
+            let prompt = match &self.entries[start] {
+                Entry::User { text, .. } => text.clone(),
+                _ => String::new(),
+            };
+            self.checkpoints.push(crate::checkpoint::Checkpoint {
+                messages,
+                entries: start,
+                prompt,
+                before,
+                after,
+                files,
+                compacted: false,
+            });
+            self.checkpoints_dirty = true;
+        }
+        self.entries.push(Entry::Notice {
+            text: if pending.is_empty() {
+                "crack closed before this turn finished.".into()
+            } else {
+                format!("crack closed before this turn finished; {} tool call(s) may have partly run. Undo (ctrl-x u) restores the files.", pending.len())
+            },
+        });
+        self.updated = now();
+    }
+
     /// Cuts the conversation back to `messages` model messages and `entries`
     /// transcript entries, dropping checkpoints for turns after that point.
     pub fn rewind(&mut self, messages: usize, entries: usize) {
@@ -502,6 +601,7 @@ impl Session {
             entries,
             usage: serde_json::from_str(&row.usage).unwrap_or_default(),
             context_tokens: row.context_tokens.max(0) as u64,
+            cost: crate::usage::get().session_cost(id),
             todos: serde_json::from_str(&row.todos).unwrap_or_default(),
             model: row.model,
             checkpoints: store

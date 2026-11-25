@@ -314,6 +314,7 @@ where
             }
             return Ok(response);
         }
+        tracing::warn!(attempt, delay_secs = delay.as_secs(), status = ?result.as_ref().ok().map(|r| r.status().as_u16()), error = ?result.as_ref().err().map(|e| e.to_string()), "model request failed; retrying");
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(std::time::Duration::from_secs(60));
     }

@@ -373,3 +373,64 @@ fn describe_files(files: &[String]) -> String {
         n => format!("restores {}, and {} more", files[..3].join(", "), n - 3),
     }
 }
+
+impl CrackView {
+    pub(super) fn recover_items(&self) -> Vec<PickerItem> {
+        let mut items = Vec::new();
+        for (id, title) in &self.interrupted {
+            items.push(PickerItem {
+                id: format!("resume:{id}"),
+                title: format!("Continue: {title}"),
+                description: Some(
+                    "open it and ask the model to check the files and carry on".into(),
+                ),
+                category: None,
+                footer: None,
+                current: false,
+                disabled: false,
+            });
+        }
+        items.push(PickerItem {
+            id: "dismiss".into(),
+            title: "Leave them".into(),
+            description: Some(
+                "they're saved with a note; undo restores any files the turn changed".into(),
+            ),
+            category: None,
+            footer: None,
+            current: false,
+            disabled: false,
+        });
+        items
+    }
+
+    pub(super) fn recover(&mut self, choice: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = choice.strip_prefix("resume:") else {
+            self.interrupted.clear();
+            return;
+        };
+        self.interrupted.retain(|(i, _)| i != id);
+        match self.tab_with_session(id) {
+            Some(tab) => self.switch_tab(tab, window, cx),
+            None => match crate::session::Session::load(id) {
+                Ok(session) => {
+                    if !self.session.is_empty() {
+                        self.new_tab(window, cx);
+                    }
+                    self.session = session;
+                    self.follow = true;
+                }
+                Err(error) => {
+                    self.show_toast(format!("{error:#}"), true, cx);
+                    return;
+                }
+            },
+        }
+        self.submit_text(
+            "crack closed before you finished the last request. Check the current state first (files may be partly changed), then continue."
+                .into(),
+            window,
+            cx,
+        );
+    }
+}

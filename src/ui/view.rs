@@ -96,6 +96,11 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
         &["memories"],
     ),
     (
+        "usage",
+        "Usage: tokens and cost by model and day",
+        &["cost"],
+    ),
+    (
         "remember",
         "Remember something for future sessions: /remember <text>",
         &[],
@@ -176,6 +181,8 @@ pub struct CrackView {
     pub(super) pending_install: Option<(String, String)>,
     /// The memory the action picker is about.
     pub(super) memory_target: Option<i64>,
+    /// Sessions whose last turn crack didn't finish: (id, title).
+    pub(super) interrupted: Vec<(String, String)>,
     recent_models: Vec<String>,
     pub(super) discovering: bool,
     /// The window title last set; updated when the session or directory changes.
@@ -267,6 +274,7 @@ impl CrackView {
             git: None,
             pending_install: None,
             memory_target: None,
+            interrupted: Vec::new(),
             recent_models,
             discovering: false,
             window_title: String::new(),
@@ -289,8 +297,27 @@ impl CrackView {
             .await;
         });
         view.connect_mcp(None, cx);
+        // Turns that were running when crack last stopped: repair them before any tab
+        // loads them, then offer to continue.
+        let interrupted = crate::recovery::interrupted(&crate::memory::project_key(&view.ws.cwd));
+        let mut repaired = Vec::new();
+        for id in interrupted {
+            match crate::recovery::repair(&id, &view.ws.cwd) {
+                Ok(session) => repaired.push((id, session.title)),
+                Err(error) => {
+                    tracing::warn!(session = %id, error = %format!("{error:#}"), "couldn't repair an interrupted turn")
+                }
+            }
+        }
         if plain_launch {
             view.restore_tabs(cx);
+        }
+        if !repaired.is_empty() {
+            view.interrupted = repaired;
+            // After startup settles, so the prompt doesn't take the focus back.
+            cx.defer_in(window, |view, window, cx| {
+                view.open_picker(PickerKind::Recover, window, cx)
+            });
         }
         if let Some(prompt) = prompt {
             view.submit_text(prompt, window, cx);
@@ -299,6 +326,11 @@ impl CrackView {
     }
 
     pub fn focus_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // An open dialog keeps the keyboard (e.g. the recovery picker at startup).
+        if let Some((picker, _)) = &self.picker {
+            window.focus(&picker.focus_handle(cx));
+            return;
+        }
         window.focus(&self.input.focus_handle(cx));
     }
 
@@ -759,6 +791,16 @@ impl CrackView {
             Some("redo") => self.redo(cx),
             Some("diff") => self.show_session_diff(cx),
             Some("memory") => self.open_picker(PickerKind::Memory, window, cx),
+            Some("usage") => {
+                let project = crate::memory::project_key(&self.ws.cwd);
+                let report = crate::usage::report(30, Some(&project));
+                self.diff_view = Some(super::undo::DiffView {
+                    title: "Usage".into(),
+                    lines: report.lines().map(|l| l.to_owned().into()).collect(),
+                    scroll: ScrollHandle::new(),
+                });
+                cx.notify();
+            }
             Some("remember") => self.remember(args, cx),
             Some("export-memory") => self.export_memory(cx),
             Some("trust-hooks") => {
@@ -881,6 +923,7 @@ impl CrackView {
         };
         self.session
             .push_user(&text, model_text, self.selection.agent, skill);
+        crate::recovery::mark_running(&self.session.id, &crate::memory::project_key(&self.ws.cwd));
         self.follow = true;
 
         let (events_tx, mut events) = mpsc::unbounded_channel();
@@ -958,6 +1001,7 @@ impl CrackView {
         }
         if let AgentEvent::Done { .. } = event {
             self.running = None;
+            crate::recovery::clear(&self.session.id);
             self.refresh_git(cx);
             self.esc_armed = None;
             self.session.todos = self.todos.lock().unwrap().clone();
@@ -1094,6 +1138,11 @@ impl CrackView {
             PickerKind::Install => ("Install a language server", self.install_items(), true),
             PickerKind::Memory => ("Memory", self.memory_items(), true),
             PickerKind::MemoryAction => ("Memory", self.memory_action_items(), true),
+            PickerKind::Recover => (
+                "crack closed before these finished",
+                self.recover_items(),
+                true,
+            ),
         };
         let search = (kind == PickerKind::Session).then(|| {
             let root = context::project_root(&self.ws.cwd);
@@ -1188,6 +1237,7 @@ impl CrackView {
             PickerKind::Undo => self.confirm_rewind(&id, cx),
             PickerKind::Memory => self.open_memory(&id, window, cx),
             PickerKind::MemoryAction => self.memory_action(&id, window, cx),
+            PickerKind::Recover => self.recover(&id, window, cx),
             PickerKind::Install => {
                 if id == "install" {
                     self.run_install(cx);
@@ -1422,7 +1472,9 @@ impl CrackView {
             "new" | "sessions" | "rename" | "copy" | "tab" | "close" => "Session",
             "models" | "effort" | "agents" | "connect" => "Agent",
             "skills" | "init" | "reload" | "cd" | "compact" | "undo" | "redo" | "diff"
-            | "trust-hooks" | "commit" | "memory" | "remember" | "export-memory" => "Project",
+            | "trust-hooks" | "commit" | "memory" | "remember" | "export-memory" | "usage" => {
+                "Project"
+            }
             "yolo" | "accept-edits" | "normal" | "sandbox" | "sandbox-network" => "Safety",
             _ => "System",
         };
@@ -1893,6 +1945,7 @@ impl CrackView {
         }
         if let AgentEvent::Done { .. } = event {
             state.running = None;
+            crate::recovery::clear(&state.session.id);
             state.esc_armed = None;
             state.session.todos = state.todos.lock().unwrap().clone();
             let title = state.session.title.clone();

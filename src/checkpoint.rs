@@ -283,6 +283,8 @@ pub type TurnChanges = (String, String, Vec<(char, String)>);
 pub struct Tracker {
     snapshots: Option<Snapshots>,
     before: Mutex<Option<String>>,
+    /// Where to note the starting snapshot, so a crash mid-turn can still be undone.
+    record_as: Option<String>,
 }
 
 impl Tracker {
@@ -290,7 +292,14 @@ impl Tracker {
         Tracker {
             snapshots,
             before: Mutex::new(None),
+            record_as: None,
         }
+    }
+
+    /// Saves the starting snapshot under `turn-before:<session>` too.
+    pub fn for_session(mut self, session: &str) -> Tracker {
+        self.record_as = Some(format!("turn-before:{session}"));
+        self
     }
 
     /// Call before a tool may change files.
@@ -301,7 +310,12 @@ impl Tracker {
         let mut before = self.before.lock().unwrap_or_else(|e| e.into_inner());
         if before.is_none() {
             match snapshots.snapshot() {
-                Ok(tree) => *before = Some(tree),
+                Ok(tree) => {
+                    if let Some(key) = &self.record_as {
+                        crate::store::get().set_kv(key, tree.clone());
+                    }
+                    *before = Some(tree);
+                }
                 Err(error) => eprintln!("crack: couldn't snapshot files for undo: {error:#}"),
             }
         }

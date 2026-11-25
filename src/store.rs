@@ -248,6 +248,21 @@ impl Store {
             .flatten()
     }
 
+    /// Every non-empty value whose key starts with `prefix`.
+    pub fn kv_prefix(&self, prefix: &str) -> Vec<(String, String)> {
+        let connection = self.reader.lock().unwrap();
+        let Ok(mut statement) = connection
+            .prepare("SELECT key, value FROM kv WHERE key >= ?1 AND key < ?2 AND value != ''")
+        else {
+            return Vec::new();
+        };
+        let end = format!("{prefix}\u{10FFFF}");
+        statement
+            .query_map(params![prefix, end], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
     pub fn load_session(&self, id: &str) -> anyhow::Result<SessionRow> {
         let connection = self.reader.lock().unwrap();
         let mut row = connection

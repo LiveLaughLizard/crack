@@ -9,14 +9,17 @@ mod code_index;
 mod config;
 mod context;
 mod delegate;
+mod doctor;
 mod git;
 mod headless;
 mod hooks;
+mod logging;
 mod lsp;
 mod mcp;
 mod memory;
 mod policy;
 mod providers;
+mod recovery;
 mod rg;
 mod runtime;
 mod sandbox;
@@ -27,6 +30,7 @@ mod store;
 mod subagents;
 mod tools;
 mod ui;
+mod usage;
 mod workspace;
 
 use flag_rs::{CommandBuilder, CompletionResult, Context, Flag, Shell};
@@ -48,9 +52,12 @@ enum Mode {
         prompt_args: Vec<String>,
         format: headless::Format,
         max_steps: Option<u32>,
+        max_cost: Option<f64>,
         tools: Option<Vec<String>>,
         permission_mode: policy::Mode,
         sandbox: Option<bool>,
+        /// Also log to stderr at this level (`--log debug`).
+        log: Option<String>,
     },
     Models {
         common: Common,
@@ -72,6 +79,14 @@ enum Mode {
     Hooks {
         common: Common,
         trust: bool,
+    },
+    Usage {
+        common: Common,
+        days: i64,
+        all: bool,
+    },
+    Doctor {
+        common: Common,
     },
     Completion(Shell),
 }
@@ -146,6 +161,8 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
     let sessions_mode = mode.clone();
     let mcp_mode = mode.clone();
     let hooks_mode = mode.clone();
+    let usage_mode = mode.clone();
+    let doctor_mode = mode.clone();
     let completion_mode = mode.clone();
 
     CommandBuilder::new("crack")
@@ -206,6 +223,8 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                         .usage("Output format")
                         .default_str("text"),
                     Flag::int("max-steps").usage("Stop after this many model requests"),
+                    Flag::string("log").usage("Also print crack's log to stderr at this level: error, warn, info, debug or trace"),
+                    Flag::string("max-cost").usage("Stop the run once it has cost this many dollars (e.g. 0.50)"),
                     Flag::string("tools").usage(
                         "Comma-separated tools to allow (bash,read,write,edit,glob,grep,list,webfetch,todowrite,skill)",
                     ),
@@ -260,9 +279,18 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                             prompt_args: ctx.args().to_vec(),
                             format,
                             max_steps,
+                            max_cost: ctx
+                                .flag("max-cost")
+                                .map(|v| {
+                                    v.parse::<f64>().map_err(|_| {
+                                        flag_rs::Error::Validation(format!("--max-cost needs a number of dollars, got '{v}'"))
+                                    })
+                                })
+                                .transpose()?,
                             tools,
                             permission_mode,
                             sandbox,
+                            log: ctx.flag("log").cloned(),
                         },
                     );
                     Ok(())
@@ -313,6 +341,39 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                         Mode::Mcp {
                             common: common(ctx)?,
                             args: ctx.args().to_vec(),
+                        },
+                    );
+                    Ok(())
+                })
+                .build(),
+            CommandBuilder::new("doctor")
+                .short("Check providers, the sandbox, tools, language servers and MCP servers")
+                .run(move |ctx| {
+                    set(&doctor_mode, Mode::Doctor { common: common(ctx)? });
+                    Ok(())
+                })
+                .build(),
+            CommandBuilder::new("usage")
+                .short("Show tokens and cost by model and day (`crack usage 7`, `crack usage all`)")
+                .run(move |ctx| {
+                    let mut days = 30;
+                    let mut all = false;
+                    for arg in ctx.args() {
+                        match arg.as_str() {
+                            "all" => all = true,
+                            n => {
+                                days = n.parse().map_err(|_| {
+                                    flag_rs::Error::Validation(format!("expected a number of days or `all`, got '{n}'"))
+                                })?
+                            }
+                        }
+                    }
+                    set(
+                        &usage_mode,
+                        Mode::Usage {
+                            common: common(ctx)?,
+                            days,
+                            all,
                         },
                     );
                     Ok(())
@@ -424,7 +485,16 @@ fn main() {
         // Help or completion output was printed.
         return;
     };
-    match dispatch(mode, &cli) {
+    let stderr_log = match &mode {
+        Mode::Run { log, .. } => log.clone(),
+        _ => None,
+    };
+    let guard = logging::init(stderr_log.as_deref());
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "crack starting");
+    let result = dispatch(mode, &cli);
+    // Exiting skips destructors: flush the log first.
+    drop(guard);
+    match result {
         Ok(code) => std::process::exit(code),
         Err(error) => {
             eprintln!("Error: {error:#}");
@@ -455,9 +525,11 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
             prompt_args,
             format,
             max_steps,
+            max_cost,
             tools,
             permission_mode,
             sandbox,
+            log: _,
         } => {
             if let Some(on) = sandbox {
                 policy::override_sandbox(on);
@@ -472,6 +544,7 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
                     selection,
                     format,
                     max_steps,
+                    max_cost,
                     tools,
                     session: common.session,
                 },
@@ -612,6 +685,19 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
                 }
             }
             Ok(if failed { 1 } else { 0 })
+        }
+        Mode::Doctor { common } => {
+            let (mut workspace, selection) = load_workspace(&common)?;
+            Ok(doctor::run(&mut workspace, &selection))
+        }
+        Mode::Usage { common, days, all } => {
+            let (workspace, _) = load_workspace(&common)?;
+            let project = memory::project_key(&workspace.cwd);
+            print!(
+                "{}",
+                usage::report(days, (!all).then_some(project.as_str()))
+            );
+            Ok(0)
         }
         Mode::Hooks { common, trust } => {
             let (workspace, _) = load_workspace(&common)?;
