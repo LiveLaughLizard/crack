@@ -155,7 +155,8 @@ fn plan(last_user_text: Option<&str>, tool_result: Option<&str>) -> Plan {
     }
     // "call: <tool> <json args>" calls any tool, e.g. an MCP one.
     if let Some(i) = text.find("call:") {
-        let rest = text[i + 5..].trim();
+        // Only the first line: crack may append context (memories) after it.
+        let rest = text[i + 5..].lines().next().unwrap_or("").trim();
         let (name, args) = rest.split_once(' ').unwrap_or((rest, "{}"));
         return Plan::Call {
             name: name.to_owned(),

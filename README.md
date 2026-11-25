@@ -231,6 +231,25 @@ The sidebar shows the branch, commits ahead and behind, and the number of change
 message in the same style. The commit itself always waits for you on the approval card,
 even in YOLO mode, and it never happens in headless runs.
 
+## Memory
+
+crack remembers useful facts about each project between sessions: your corrections and
+preferences, how the project works, decisions and why, and gotchas that cost time.
+
+- **The model saves** them with a `remember` tool, and they're marked **new** until you
+  review them. You add your own with `/remember <text>`.
+- **Before each request,** the relevant ones (pinned, plus the best matches for what you
+  asked) go to the model with your message. The system prompt doesn't change, so the
+  prompt cache keeps working. The model can also search them with `recall`.
+- **The Memory panel** (`/memory` or the command palette) lists them, newest unreviewed
+  first. Enter opens the actions: keep, pin, edit, open the session it came from, or
+  delete; ctrl-d twice also deletes.
+- **`/export-memory`** writes `.crack/MEMORY.md` for your team to review and commit.
+
+Memories never cross projects. The exception is "global" preferences, which the model saves
+only for things that apply everywhere. Anything that looks like a credential is refused.
+`memory = false` turns memory off.
+
 ## Code intelligence
 
 **Symbols (tree-sitter).** crack indexes the functions, types, methods and modules in

@@ -222,6 +222,19 @@ pub(crate) async fn turn_loop(
     if !ctx.mcp.is_empty() {
         added.extend(ctx.mcp.expand_prompt(&prompt).await);
     }
+    // What earlier sessions saved that bears on this request.
+    if ctx.memory {
+        let project = crate::memory::project_key(&ctx.cwd);
+        let prompt = prompt.clone();
+        let found = tokio::task::spawn_blocking(move || {
+            crate::memory::get().relevant(&project, &prompt, 2_000)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+        added.extend(crate::memory::reminder(&found));
+    }
     if !added.is_empty() {
         let text = added.join("\n\n");
         if let Some(last) = history.last_mut() {

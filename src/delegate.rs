@@ -198,6 +198,8 @@ pub async fn run(
         } else {
             ctx.checkpoint.clone()
         },
+        // Memory reminders are for the main conversation.
+        memory: false,
         ..ctx.clone()
     };
 

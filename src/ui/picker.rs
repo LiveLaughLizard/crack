@@ -41,10 +41,12 @@ pub enum PickerKind {
     Mcp,
     Undo,
     Install,
+    Memory,
+    MemoryAction,
 }
 
 pub enum PickerEvent {
-    /// Delete this item (sessions only); sent after a second ctrl-d.
+    /// Delete this item (sessions and memories); sent after a second ctrl-d.
     Delete(String),
     Confirm(PickerKind, String),
     Dismiss,
@@ -382,13 +384,16 @@ impl Render for Picker {
                     .child("↑↓ select")
                     .child("enter confirm")
                     .child("esc close")
-                    .when(self.kind == PickerKind::Session, |d| {
-                        d.child(if self.armed_delete.is_some() {
-                            "ctrl-d again to delete"
-                        } else {
-                            "ctrl-d delete"
-                        })
-                    }),
+                    .when(
+                        matches!(self.kind, PickerKind::Session | PickerKind::Memory),
+                        |d| {
+                            d.child(if self.armed_delete.is_some() {
+                                "ctrl-d again to delete"
+                            } else {
+                                "ctrl-d delete"
+                            })
+                        },
+                    ),
             )
     }
 }
@@ -431,7 +436,7 @@ impl Picker {
 
     /// The first ctrl-d arms the selected item; a second one deletes it.
     fn delete_selected(&mut self, cx: &mut Context<Self>) {
-        if self.kind != PickerKind::Session {
+        if !matches!(self.kind, PickerKind::Session | PickerKind::Memory) {
             return;
         }
         let Some(item) = self.filtered.get(self.selected).map(|i| &self.items[*i]) else {

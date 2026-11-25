@@ -4,6 +4,7 @@
 
 mod input;
 mod markdown;
+mod memory;
 mod picker;
 mod providers;
 pub mod render;

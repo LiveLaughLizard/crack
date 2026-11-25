@@ -91,6 +91,17 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
         &["summarize"],
     ),
     (
+        "memory",
+        "Memory: what crack remembers about this project",
+        &["memories"],
+    ),
+    (
+        "remember",
+        "Remember something for future sessions: /remember <text>",
+        &[],
+    ),
+    ("export-memory", "Export memories to .crack/MEMORY.md", &[]),
+    (
         "commit",
         "Commit: the model drafts a message from the diff, you approve",
         &[],
@@ -163,6 +174,8 @@ pub struct CrackView {
     pub(super) git: Option<crate::git::Status>,
     /// A language server the user may install: (name, command).
     pub(super) pending_install: Option<(String, String)>,
+    /// The memory the action picker is about.
+    pub(super) memory_target: Option<i64>,
     recent_models: Vec<String>,
     pub(super) discovering: bool,
     /// The window title last set; updated when the session or directory changes.
@@ -253,6 +266,7 @@ impl CrackView {
             hooks_warned: false,
             git: None,
             pending_install: None,
+            memory_target: None,
             recent_models,
             discovering: false,
             window_title: String::new(),
@@ -744,6 +758,9 @@ impl CrackView {
             Some("undo") => self.undo(window, cx),
             Some("redo") => self.redo(cx),
             Some("diff") => self.show_session_diff(cx),
+            Some("memory") => self.open_picker(PickerKind::Memory, window, cx),
+            Some("remember") => self.remember(args, cx),
+            Some("export-memory") => self.export_memory(cx),
             Some("trust-hooks") => {
                 let hooks = crate::hooks::Hooks::new(&self.ws.config.hooks, &self.ws.cwd, "");
                 let untrusted = hooks.untrusted();
@@ -1075,6 +1092,8 @@ impl CrackView {
             PickerKind::Mcp => ("MCP servers", self.mcp_items(), true),
             PickerKind::Undo => ("Undo", self.undo_items(), true),
             PickerKind::Install => ("Install a language server", self.install_items(), true),
+            PickerKind::Memory => ("Memory", self.memory_items(), true),
+            PickerKind::MemoryAction => ("Memory", self.memory_action_items(), true),
         };
         let search = (kind == PickerKind::Session).then(|| {
             let root = context::project_root(&self.ws.cwd);
@@ -1110,6 +1129,10 @@ impl CrackView {
         let (kind, id) = match event {
             PickerEvent::Dismiss => {
                 self.close_picker(window, cx);
+                return;
+            }
+            PickerEvent::Delete(id) if id.starts_with("mem:") => {
+                self.delete_memory(id, cx);
                 return;
             }
             PickerEvent::Delete(id) => {
@@ -1163,6 +1186,8 @@ impl CrackView {
             }
             PickerKind::Help => {}
             PickerKind::Undo => self.confirm_rewind(&id, cx),
+            PickerKind::Memory => self.open_memory(&id, window, cx),
+            PickerKind::MemoryAction => self.memory_action(&id, window, cx),
             PickerKind::Install => {
                 if id == "install" {
                     self.run_install(cx);
@@ -1385,6 +1410,9 @@ impl CrackView {
             ("skills", "ctrl-x k"),
             ("copy", "ctrl-x y"),
             ("sidebar", "ctrl-x b"),
+            ("undo", "ctrl-x u"),
+            ("redo", "ctrl-x r"),
+            ("diff", "ctrl-x d"),
             ("help", "ctrl-x h"),
             ("exit", "ctrl-x q"),
         ]
@@ -1394,7 +1422,7 @@ impl CrackView {
             "new" | "sessions" | "rename" | "copy" | "tab" | "close" => "Session",
             "models" | "effort" | "agents" | "connect" => "Agent",
             "skills" | "init" | "reload" | "cd" | "compact" | "undo" | "redo" | "diff"
-            | "trust-hooks" => "Project",
+            | "trust-hooks" | "commit" | "memory" | "remember" | "export-memory" => "Project",
             "yolo" | "accept-edits" | "normal" | "sandbox" | "sandbox-network" => "Safety",
             _ => "System",
         };

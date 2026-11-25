@@ -68,6 +68,10 @@ pub struct ToolContext {
     pub loaded: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
     /// Snapshots files before the turn first changes them, for undo.
     pub checkpoint: Arc<crate::checkpoint::Tracker>,
+    /// The session, for memories' source links.
+    pub session_id: String,
+    /// Offer `remember` and `recall`.
+    pub memory: bool,
     /// Use language servers: diagnostics after edits, and the LSP tools.
     pub lsp: bool,
     /// How long to wait for a language server's diagnostics after an edit.
@@ -158,6 +162,8 @@ const READ_ONLY: &[&str] = &[
     "references",
     "hover",
     "read_mcp_resource",
+    "remember",
+    "recall",
 ];
 
 pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
@@ -288,6 +294,9 @@ pub fn specs(agent: Agent, ctx: &ToolContext) -> Vec<ToolSpec> {
         all.extend(crate::git::specs());
     }
     all.extend(crate::code_index::specs());
+    if ctx.memory {
+        all.extend(crate::memory::specs());
+    }
     if ctx.lsp && crate::lsp::available(&ctx.cwd) {
         all.extend(crate::lsp::specs());
     }
@@ -404,6 +413,8 @@ pub fn title(name: &str, input: &Value) -> String {
                 .filter(|s| !s.is_empty())
                 .unwrap_or("general")
         ),
+        "remember" => format!("Remember: {}", arg("text")),
+        "recall" => format!("Recall \"{}\"", arg("query")),
         "symbols" => format!("Symbols in {}", arg("path")),
         "find_symbol" => format!("Find symbol \"{}\"", arg("name")),
         "read_symbol" => format!("Read symbol {}", arg("name")),
@@ -508,6 +519,7 @@ pub async fn run(name: &str, input: &Value, ctx: &ToolContext, agent: Agent) -> 
                     )
                 })
         }
+        "remember" | "recall" => memory_tool(name, input, ctx),
         "symbols" | "find_symbol" | "read_symbol" => {
             let (name, input, cwd) = (name.to_owned(), input.clone(), ctx.cwd.clone());
             tokio::task::spawn_blocking(move || crate::code_index::tool(&name, &input, &cwd))
@@ -1231,6 +1243,65 @@ async fn run_mcp(
     })
 }
 
+fn memory_tool(name: &str, input: &Value, ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
+    let memories = crate::memory::get();
+    let project = crate::memory::project_key(&ctx.cwd);
+    match name {
+        "remember" => {
+            let text = str_arg(input, "text").ok_or_else(|| anyhow::anyhow!("missing text"))?;
+            if crate::policy::looks_secret(text) {
+                anyhow::bail!(
+                    "that looks like a secret; memories aren't the place for credentials"
+                );
+            }
+            let kind = str_arg(input, "kind").unwrap_or("project");
+            let global = input
+                .get("global")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let scope = if global { String::new() } else { project };
+            memories.add(
+                &scope,
+                kind,
+                text,
+                str_arg(input, "reason").unwrap_or(""),
+                &ctx.session_id,
+                true,
+            )?;
+            Ok(ToolOutput::ok(
+                format!(
+                    "Saved ({kind}{}). The user can review it in the Memory panel.",
+                    if global { ", global" } else { "" }
+                ),
+                ToolMeta {
+                    title: format!("Remember: {text}"),
+                    ..Default::default()
+                },
+            ))
+        }
+        _ => {
+            let query = str_arg(input, "query").ok_or_else(|| anyhow::anyhow!("missing query"))?;
+            let found = memories.search(&project, query, 20)?;
+            let text = if found.is_empty() {
+                "Nothing saved about that.".to_owned()
+            } else {
+                found
+                    .iter()
+                    .map(|m| format!("- [{}] {}", m.kind, m.text))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            Ok(ToolOutput::ok(
+                text,
+                ToolMeta {
+                    title: format!("Recall \"{query}\" ({})", found.len()),
+                    ..Default::default()
+                },
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1245,6 +1316,8 @@ mod tests {
             loaded: Default::default(),
             checkpoint: Default::default(),
             lsp: false,
+            session_id: String::new(),
+            memory: false,
             lsp_wait: Duration::from_secs(3),
             mcp: crate::mcp::McpHub::new(Default::default(), reqwest::Client::new()),
             sandbox: None,

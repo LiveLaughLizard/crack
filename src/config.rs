@@ -37,6 +37,8 @@ pub struct Config {
     pub subagent_model: Option<String>,
     /// Model requests a subagent may make (default 60).
     pub subagent_max_steps: Option<u32>,
+    /// Project memory: `remember`/`recall` and reminders before each turn (default true).
+    pub memory: Option<bool>,
     /// Use language servers when installed (default true).
     pub lsp: Option<bool>,
     /// How long to wait for diagnostics after an edit, in milliseconds (default 3000).
@@ -202,6 +204,9 @@ impl Config {
         }
         if layer.subagent_max_steps.is_some() {
             self.subagent_max_steps = layer.subagent_max_steps;
+        }
+        if layer.memory.is_some() {
+            self.memory = layer.memory;
         }
         if layer.lsp.is_some() {
             self.lsp = layer.lsp;

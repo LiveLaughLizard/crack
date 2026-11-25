@@ -349,6 +349,53 @@ const DANGER: &[&str] = &[
 ];
 
 /// Paths whose contents never go to the model.
+/// Text that looks like it contains a credential (API keys, tokens, private keys).
+pub fn looks_secret(text: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "sk-",
+        "sk_live_",
+        "AKIA",
+        "ASIA",
+        "ghp_",
+        "gho_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "AIza",
+        "glpat-",
+        "-----BEGIN",
+    ];
+    if text.split_whitespace().any(|w| {
+        let w = w.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+        PREFIXES
+            .iter()
+            .any(|p| w.starts_with(p) && w.len() >= p.len() + 12)
+    }) || text.contains("-----BEGIN")
+    {
+        return true;
+    }
+    let lower = text.to_ascii_lowercase();
+    [
+        "password=",
+        "password:",
+        "secret=",
+        "token=",
+        "api_key=",
+        "apikey=",
+    ]
+    .iter()
+    .any(|k| {
+        lower.find(k).is_some_and(|i| {
+            lower[i + k.len()..]
+                .trim_start()
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .count()
+                >= 6
+        })
+    })
+}
+
 fn is_secret(path: &Path) -> bool {
     let text = path.display().to_string();
     let name = path

@@ -460,7 +460,9 @@ impl McpHub {
                 server.status = Status::Connected;
             }
             Err(Failure::NeedsAuth) => server.status = Status::NeedsAuth,
-            Err(Failure::Other(error)) => server.status = Status::Failed(readable(&format!("{error:#}"))),
+            Err(Failure::Other(error)) => {
+                server.status = Status::Failed(readable(&format!("{error:#}")))
+            }
         }
     }
 

@@ -14,6 +14,7 @@ mod headless;
 mod hooks;
 mod lsp;
 mod mcp;
+mod memory;
 mod policy;
 mod providers;
 mod rg;
