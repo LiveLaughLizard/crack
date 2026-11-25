@@ -868,7 +868,9 @@ impl Sandbox {
         );
         Sandbox {
             wanted,
-            available: crate::sandbox::native_available() || bwrap_installed(),
+            available: crate::sandbox::native_available()
+                || crate::sandbox::seatbelt_available()
+                || bwrap_installed(),
             forced,
             network: state
                 .sandbox_network
@@ -887,6 +889,8 @@ impl Sandbox {
     pub fn backend(&self) -> &'static str {
         if crate::sandbox::native_available() {
             "built-in"
+        } else if crate::sandbox::seatbelt_available() {
+            "sandbox-exec"
         } else if bwrap_installed() {
             "bubblewrap"
         } else {
@@ -919,6 +923,20 @@ pub fn hidden_paths() -> Vec<PathBuf> {
 /// /tmp and package caches writable, secrets hidden, and no network unless allowed.
 /// Uses the built-in sandbox (Landlock) where the kernel has it, else bubblewrap.
 pub fn sandboxed(command: &str, settings: &Sandbox, root: &Path) -> Option<Vec<String>> {
+    if crate::sandbox::seatbelt_available() {
+        let mut writable = vec![
+            root.to_owned(),
+            PathBuf::from("/tmp"),
+            PathBuf::from("/private/var/folders"),
+        ];
+        writable.extend(settings.writable.iter().filter(|p| p.exists()).cloned());
+        return Some(crate::sandbox::seatbelt_command(
+            command,
+            &writable,
+            &hidden_paths(),
+            settings.network,
+        ));
+    }
     if crate::sandbox::native_available() {
         let mut writable = vec![
             root.to_owned(),

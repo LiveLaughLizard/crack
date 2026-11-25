@@ -211,3 +211,106 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+/// macOS: `sandbox-exec` (Seatbelt) is there to use.
+pub fn seatbelt_available() -> bool {
+    cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").exists()
+}
+
+/// A Seatbelt profile: writes only in `writable`, no reads in `hidden`, and no IP
+/// networking unless `network` (local Unix sockets still work).
+pub fn seatbelt_profile(writable: &[PathBuf], hidden: &[PathBuf], network: bool) -> String {
+    // Seatbelt matches real paths (/tmp is /private/tmp on macOS).
+    let real = |p: &PathBuf| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+    let quote = |p: &Path| {
+        format!(
+            "\"{}\"",
+            p.display()
+                .to_string()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+        )
+    };
+    let mut profile = String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
+    let mut allowed: Vec<String> = writable
+        .iter()
+        .map(|p| format!("(subpath {})", quote(&real(p))))
+        .collect();
+    allowed.push("(literal \"/dev/null\")".into());
+    allowed.push("(literal \"/dev/tty\")".into());
+    allowed.push("(literal \"/dev/dtracehelper\")".into());
+    allowed.push("(regex #\"^/dev/fd/\")".into());
+    profile.push_str(&format!("(allow file-write* {})\n", allowed.join(" ")));
+    let denied: Vec<String> = hidden
+        .iter()
+        .filter(|p| p.exists())
+        .map(|p| format!("(subpath {})", quote(&real(p))))
+        .collect();
+    if !denied.is_empty() {
+        profile.push_str(&format!("(deny file-read* {})\n", denied.join(" ")));
+    }
+    if !network {
+        profile
+            .push_str("(deny network-outbound (remote ip))\n(deny network-inbound (local ip))\n");
+    }
+    profile
+}
+
+/// The argv that runs `command` under Seatbelt on macOS.
+pub fn seatbelt_command(
+    command: &str,
+    writable: &[PathBuf],
+    hidden: &[PathBuf],
+    network: bool,
+) -> Vec<String> {
+    vec![
+        "/usr/bin/sandbox-exec".into(),
+        "-p".into(),
+        seatbelt_profile(writable, hidden, network),
+        "bash".into(),
+        "-c".into(),
+        command.to_owned(),
+    ]
+}
+
+#[cfg(test)]
+mod seatbelt_tests {
+    use super::*;
+
+    #[test]
+    fn profile_limits_writes_reads_and_network() {
+        let profile = seatbelt_profile(
+            &[PathBuf::from("/work/project")],
+            &[std::env::temp_dir()],
+            false,
+        );
+        assert!(profile.contains("(deny file-write*)"));
+        assert!(profile.contains("(subpath \"/work/project\")"));
+        assert!(profile.contains("(deny file-read*"));
+        assert!(profile.contains("(deny network-outbound (remote ip))"));
+        assert!(!seatbelt_profile(&[], &[], true).contains("network"));
+    }
+
+    /// The real thing, on macOS (CI): writes inside the project work, outside don't.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_blocks_writes_outside_the_project() {
+        let root = std::env::temp_dir().join(format!("crack-sb-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = dirs::home_dir()
+            .unwrap()
+            .join(format!(".crack-sb-test-{}", std::process::id()));
+        let run = |command: &str| {
+            let argv = seatbelt_command(command, &[root.clone()], &[], false);
+            std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(run(&format!("echo ok > {}/inside", root.display())));
+        assert!(!run(&format!("echo no > {}", outside.display())));
+        assert!(!outside.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
