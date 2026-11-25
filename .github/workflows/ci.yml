@@ -32,7 +32,7 @@ jobs:
             libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libx11-xcb-dev libxcb1-dev libvulkan1
 
-      # rustup reads rust-toolchain.toml (stable, with rustfmt and clippy).
+      # rustup reads rust-toolchain.toml (a pinned version, with rustfmt and clippy).
       - name: Install Rust
         run: rustup toolchain install
 
