@@ -647,6 +647,35 @@ arguments to wait for it however long it takes (`slow-cmd | crack run - "summari
 Shell completion (with live `--model` completion): `source <(crack completion bash)`
 (also `zsh` and `fish`).
 
+## Extensions
+
+`/extensions` (or `crack extensions`) lists popular skill packs and MCP servers that
+install with one click. Nothing is installed until you pick it.
+
+| id | What | License |
+|---|---|---|
+| `caveman` | Terse replies that cut output tokens ([JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman)) | Apache-2.0 |
+| `ponytail` | Write less code; reuse what exists ([DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail)) | MIT |
+| `superpowers` | Brainstorm, plan, test first, debug, verify ([obra/superpowers](https://github.com/obra/superpowers)) | MIT |
+| `frontend-design` | Distinctive web interfaces ([anthropics/skills](https://github.com/anthropics/skills)) | Apache-2.0 |
+| `anthropic-skills` | All of Anthropic's public skills ([anthropics/skills](https://github.com/anthropics/skills)) | Apache-2.0 |
+| `mattpocock` | Engineering and productivity skills ([mattpocock/skills](https://github.com/mattpocock/skills)) | MIT |
+| `agent-skills` | Production engineering skills ([addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)) | MIT |
+| `context7` | Up-to-date library docs (hosted MCP server) | MIT |
+| `playwright` | Drive a real browser (MCP server; needs Node.js) | Apache-2.0 |
+
+```
+crack extensions                      # list, with what's installed
+crack extensions install ponytail
+crack extensions update ponytail      # latest version
+crack extensions remove ponytail
+```
+
+Skill packs are downloaded from their own repositories when you install them (crack
+doesn't bundle them) into `~/.config/crack/skills/<id>`, with the project's license
+file. MCP servers are added to your config as `[mcp.<id>]`. Skills are instructions
+the model follows, written by third parties: read them before relying on them.
+
 ## Instructions and skills
 
 Instruction files go into the system prompt, in this order:

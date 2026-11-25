@@ -4,6 +4,7 @@
 //! `crack run "..."` does one turn headless for scripts and CI.
 
 mod agent;
+mod catalog;
 mod checkpoint;
 mod code_index;
 mod config;
@@ -82,6 +83,10 @@ enum Mode {
     Hooks {
         common: Common,
         trust: bool,
+    },
+    Extensions {
+        common: Common,
+        args: Vec<String>,
     },
     Usage {
         common: Common,
@@ -164,6 +169,7 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
     let sessions_mode = mode.clone();
     let mcp_mode = mode.clone();
     let hooks_mode = mode.clone();
+    let extensions_mode = mode.clone();
     let usage_mode = mode.clone();
     let doctor_mode = mode.clone();
     let completion_mode = mode.clone();
@@ -347,6 +353,19 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                     set(
                         &mcp_mode,
                         Mode::Mcp {
+                            common: common(ctx)?,
+                            args: ctx.args().to_vec(),
+                        },
+                    );
+                    Ok(())
+                })
+                .build(),
+            CommandBuilder::new("extensions")
+                .short("Popular skill packs and MCP servers: `crack extensions install|update|remove <id>`")
+                .run(move |ctx| {
+                    set(
+                        &extensions_mode,
+                        Mode::Extensions {
                             common: common(ctx)?,
                             args: ctx.args().to_vec(),
                         },
@@ -711,6 +730,40 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
                 usage::report(days, (!all).then_some(project.as_str()))
             );
             Ok(0)
+        }
+        Mode::Extensions { common, args } => {
+            let (workspace, _) = load_workspace(&common)?;
+            match (args.first().map(String::as_str), args.get(1)) {
+                (None, _) => {
+                    print!("{}", catalog::report(&workspace.config));
+                    Ok(0)
+                }
+                (Some(action @ ("install" | "update" | "remove")), Some(id)) => {
+                    let Some(entry) = catalog::find(id) else {
+                        eprintln!("No extension '{id}'; `crack extensions` lists them.");
+                        return Ok(1);
+                    };
+                    let result = if action == "remove" {
+                        catalog::remove(entry)
+                    } else {
+                        catalog::install(entry)
+                    };
+                    match result {
+                        Ok(message) => {
+                            println!("{message}");
+                            Ok(0)
+                        }
+                        Err(error) => {
+                            eprintln!("Couldn't {action} {}: {error:#}", entry.name);
+                            Ok(1)
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("Usage: crack extensions [install|update|remove <id>]");
+                    Ok(2)
+                }
+            }
         }
         Mode::Hooks { common, trust } => {
             let (workspace, _) = load_workspace(&common)?;

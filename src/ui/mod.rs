@@ -3,6 +3,7 @@
 //! prompt and sidebar, and keyboard-driven dialogs.
 
 mod attach;
+mod extensions;
 mod input;
 mod markdown;
 mod memory;

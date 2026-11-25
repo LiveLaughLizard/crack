@@ -96,6 +96,11 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
         &["memories"],
     ),
     (
+        "extensions",
+        "Extensions: install popular skill packs and MCP servers",
+        &["plugins", "marketplace", "install"],
+    ),
+    (
         "settings",
         "Settings: theme, font, effort, mode and permissions",
         &["preferences", "config"],
@@ -186,6 +191,7 @@ pub struct CrackView {
     pub(super) pending_install: Option<(String, String)>,
     /// The memory the action picker is about.
     pub(super) memory_target: Option<i64>,
+    pub(super) extension_target: Option<&'static str>,
     /// Sessions whose last turn crack didn't finish: (id, title).
     pub(super) interrupted: Vec<(String, String)>,
     /// Project files for `@` suggestions, and when they were listed.
@@ -285,6 +291,7 @@ impl CrackView {
             git: None,
             pending_install: None,
             memory_target: None,
+            extension_target: None,
             interrupted: Vec::new(),
             file_cache: None,
             attachments: Vec::new(),
@@ -824,6 +831,7 @@ impl CrackView {
             Some("redo") => self.redo(cx),
             Some("diff") => self.show_session_diff(cx),
             Some("memory") => self.open_picker(PickerKind::Memory, window, cx),
+            Some("extensions") => self.open_picker(PickerKind::Extensions, window, cx),
             Some("settings") => self.open_picker(PickerKind::Settings, window, cx),
             Some("usage") => {
                 let project = crate::memory::project_key(&self.ws.cwd);
@@ -1180,6 +1188,8 @@ impl CrackView {
             PickerKind::Install => ("Install a language server", self.install_items(), true),
             PickerKind::Memory => ("Memory", self.memory_items(), true),
             PickerKind::MemoryAction => ("Memory", self.memory_action_items(), true),
+            PickerKind::Extensions => ("Extensions", self.extension_items(), true),
+            PickerKind::ExtensionAction => ("Extensions", self.extension_action_items(), false),
             PickerKind::Recover => (
                 "crack closed before these finished",
                 self.recover_items(),
@@ -1281,6 +1291,8 @@ impl CrackView {
             PickerKind::Undo => self.confirm_rewind(&id, cx),
             PickerKind::Memory => self.open_memory(&id, window, cx),
             PickerKind::MemoryAction => self.memory_action(&id, window, cx),
+            PickerKind::Extensions => self.open_extension(&id, window, cx),
+            PickerKind::ExtensionAction => self.extension_action(&id, cx),
             PickerKind::Recover => self.recover(&id, window, cx),
             PickerKind::Settings => self.open_setting(&id, window, cx),
             PickerKind::SettingsValue => self.apply_setting(&id, window, cx),
@@ -1520,9 +1532,8 @@ impl CrackView {
             "settings" => "System",
             "models" | "effort" | "agents" | "connect" => "Agent",
             "skills" | "init" | "reload" | "cd" | "compact" | "undo" | "redo" | "diff"
-            | "trust-hooks" | "commit" | "memory" | "remember" | "export-memory" | "usage" => {
-                "Project"
-            }
+            | "trust-hooks" | "commit" | "memory" | "remember" | "export-memory" | "usage"
+            | "extensions" => "Project",
             "yolo" | "accept-edits" | "normal" | "sandbox" | "sandbox-network" => "Safety",
             _ => "System",
         };

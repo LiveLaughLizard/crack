@@ -493,6 +493,50 @@ pub fn set_user_value(table: &str, key: &str, value: toml_edit::Value) -> anyhow
     Ok(path)
 }
 
+/// Adds `[mcp.<name>]` to the user's own config file: a hosted server (`url`) or a
+/// local command.
+pub fn set_user_mcp(name: &str, url: Option<&str>, command: &[&str]) -> anyhow::Result<PathBuf> {
+    let path = global_dir()
+        .ok_or_else(|| anyhow::anyhow!("no config folder"))?
+        .join("config.toml");
+    let mut doc = read_doc(&path)?;
+    if !doc.contains_key("mcp") {
+        let mut table = toml_edit::Table::new();
+        table.set_implicit(true);
+        doc["mcp"] = toml_edit::Item::Table(table);
+    }
+    let mut server = toml_edit::Table::new();
+    if let Some(url) = url {
+        server["url"] = toml_edit::value(url);
+    } else if let Some((program, args)) = command.split_first() {
+        server["command"] = toml_edit::value(*program);
+        let mut list = toml_edit::Array::new();
+        for arg in args {
+            list.push(*arg);
+        }
+        server["args"] = toml_edit::value(list);
+    }
+    doc["mcp"][name] = toml_edit::Item::Table(server);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, doc.to_string())?;
+    Ok(path)
+}
+
+/// Removes `[mcp.<name>]` from the user's own config file.
+pub fn remove_user_mcp(name: &str) -> anyhow::Result<PathBuf> {
+    let path = global_dir()
+        .ok_or_else(|| anyhow::anyhow!("no config folder"))?
+        .join("config.toml");
+    let mut doc = read_doc(&path)?;
+    if let Some(table) = doc.get_mut("mcp").and_then(|t| t.as_table_like_mut()) {
+        table.remove(name);
+    }
+    std::fs::write(&path, doc.to_string())?;
+    Ok(path)
+}
+
 /// Sets a top-level key in the user's own config file.
 pub fn set_user_top_value(key: &str, value: toml_edit::Value) -> anyhow::Result<PathBuf> {
     let path = global_dir()

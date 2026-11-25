@@ -43,6 +43,8 @@ pub enum PickerKind {
     Install,
     Memory,
     MemoryAction,
+    Extensions,
+    ExtensionAction,
     Recover,
     Settings,
     SettingsValue,
