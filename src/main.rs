@@ -977,7 +977,37 @@ fn plugin_command(args: &[String]) -> i32 {
             plugins::remove_marketplace(name).map(|_| format!("Removed {name}."))
         }
         ["install" | "update", spec] => (|| {
-            let pending = plugins::prepare(spec)?;
+            let pending = match plugins::prepare(spec) {
+                Ok(pending) => pending,
+                // A plugin installed by running a command: show it and ask first.
+                Err(error)
+                    if error
+                        .downcast_ref::<plugins::NeedsCommandConsent>()
+                        .is_some() =>
+                {
+                    let command = &error
+                        .downcast_ref::<plugins::NeedsCommandConsent>()
+                        .unwrap()
+                        .0;
+                    println!(
+                        "{spec} is installed by running this command from your home folder:\n\n  {command}\n"
+                    );
+                    let mut ok = yes;
+                    if !yes && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                        print!("Run it? [y/N] ");
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        let mut answer = String::new();
+                        let _ = std::io::stdin().read_line(&mut answer);
+                        ok = matches!(answer.trim(), "y" | "Y" | "yes");
+                    }
+                    anyhow::ensure!(
+                        ok,
+                        "not installed: the command wasn't approved (add --yes to approve it)"
+                    );
+                    plugins::prepare_with(spec, true)?
+                }
+                Err(error) => return Err(error),
+            };
             let mut approved = yes;
             if pending.review.runs_code() && !yes {
                 println!(

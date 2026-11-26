@@ -296,7 +296,12 @@ pub fn resolve(state: &State, spec: &str) -> anyhow::Result<Listing> {
 }
 
 /// Fetches a plugin into a scratch folder; returns (folder, commit).
-fn fetch(listing: &Listing, market_dir: &Path, work: &Path) -> anyhow::Result<(PathBuf, String)> {
+fn fetch(
+    listing: &Listing,
+    market_dir: &Path,
+    work: &Path,
+    allow_command: bool,
+) -> anyhow::Result<(PathBuf, String)> {
     let source = &listing.entry["source"];
     let into = work.join("plugin");
     match source {
@@ -322,6 +327,12 @@ fn fetch(listing: &Listing, market_dir: &Path, work: &Path) -> anyhow::Result<(P
         }
         Value::Object(map) => {
             let kind = map.get("source").and_then(Value::as_str).unwrap_or("");
+            match kind {
+                "archive" => return fetch_archive(map, &into, work),
+                "npm" => return fetch_npm(map, &into, work),
+                "command" => return fetch_command(map, &into, allow_command),
+                _ => {}
+            }
             let reference = map.get("ref").and_then(Value::as_str);
             let url = match kind {
                 "github" => format!(
@@ -334,7 +345,7 @@ fn fetch(listing: &Listing, market_dir: &Path, work: &Path) -> anyhow::Result<(P
                     .unwrap_or("")
                     .to_owned(),
                 other => anyhow::bail!(
-                    "plugin source type '{other}' isn't supported yet (github, url and git-subdir are)"
+                    "plugin source type '{other}' isn't supported (github, url, git-subdir, archive, npm and command are)"
                 ),
             };
             let checkout = work.join("checkout");
@@ -357,6 +368,249 @@ fn fetch(listing: &Listing, market_dir: &Path, work: &Path) -> anyhow::Result<(P
         }
         _ => anyhow::bail!("plugin '{}' has no source", listing.name),
     }
+}
+
+/// A `command`-sourced plugin is installed by running a command; the user sees it first.
+#[derive(Debug)]
+pub struct NeedsCommandConsent(pub String);
+
+impl std::fmt::Display for NeedsCommandConsent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this plugin is installed by running `{}` on your machine; install it with `crack plugin install`, which shows the command and asks first",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for NeedsCommandConsent {}
+
+/// The plugin root of an unpacked download: the top, or a single folder inside it.
+fn plugin_root(dir: &Path) -> PathBuf {
+    let looks_like_plugin = |d: &Path| {
+        [".claude-plugin", "skills", "commands", "agents", "hooks"]
+            .iter()
+            .any(|n| d.join(n).exists())
+    };
+    if looks_like_plugin(dir) {
+        return dir.to_owned();
+    }
+    let entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|r| r.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    match entries.as_slice() {
+        [only] if only.is_dir() => only.clone(),
+        _ => dir.to_owned(),
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+/// `{"source": "archive", "url": "https://...zip", "sha256": "..."}`.
+fn fetch_archive(
+    map: &serde_json::Map<String, Value>,
+    into: &Path,
+    work: &Path,
+) -> anyhow::Result<(PathBuf, String)> {
+    let url = map.get("url").and_then(Value::as_str).unwrap_or_default();
+    anyhow::ensure!(
+        url.starts_with("https://"),
+        "archive plugins must come over https"
+    );
+    let host = reqwest::Url::parse(url)?
+        .host_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    anyhow::ensure!(
+        !(host == "localhost"
+            || host.starts_with("127.")
+            || host.starts_with("169.254.")
+            || host == "metadata.google.internal"),
+        "archive URLs can't point at this machine or a cloud metadata service"
+    );
+    let bytes = crate::runtime::block_on(async {
+        let response = crate::workspace::http_client()?
+            .get(url)
+            .timeout(std::time::Duration::from_secs(300))
+            .send()
+            .await?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "download failed: {}",
+            response.status()
+        );
+        anyhow::Ok(response.bytes().await?.to_vec())
+    })?;
+    anyhow::ensure!(
+        (bytes.len() as u64) < MAX_PLUGIN_BYTES,
+        "the archive is too large"
+    );
+    let digest = sha256_hex(&bytes);
+    if let Some(pin) = map.get("sha256").and_then(Value::as_str) {
+        anyhow::ensure!(
+            digest.eq_ignore_ascii_case(pin),
+            "the archive doesn't match its sha256 pin"
+        );
+    }
+    let archive = work.join("plugin.zip");
+    std::fs::write(&archive, &bytes)?;
+    let unpacked = work.join("unpacked");
+    std::fs::create_dir_all(&unpacked)?;
+    let ok = if crate::policy::which("unzip").is_some() {
+        std::process::Command::new("unzip")
+            .args(["-q", "-o"])
+            .arg(&archive)
+            .arg("-d")
+            .arg(&unpacked)
+            .status()?
+    } else {
+        std::process::Command::new("tar")
+            .arg("-xf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&unpacked)
+            .status()?
+    };
+    anyhow::ensure!(
+        ok.success(),
+        "couldn't unpack the archive (is unzip installed?)"
+    );
+    copy_tree(&plugin_root(&unpacked), into, &mut 0, MAX_PLUGIN_BYTES)?;
+    Ok((into.to_owned(), digest[..12].to_owned()))
+}
+
+/// `{"source": "npm", "package": "@org/name", "version": "1.2.0", "registry": "..."}`.
+/// Fetched with `npm pack` (no install scripts run, no dependencies installed).
+fn fetch_npm(
+    map: &serde_json::Map<String, Value>,
+    into: &Path,
+    work: &Path,
+) -> anyhow::Result<(PathBuf, String)> {
+    let package = map
+        .get("package")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        !package.is_empty()
+            && !package.starts_with("git")
+            && !package.starts_with("file:")
+            && !package.starts_with("npm:")
+            && !package.starts_with("http:"),
+        "npm source '{package}' isn't a registry package or https tarball"
+    );
+    anyhow::ensure!(crate::policy::which("npm").is_some(), "npm isn't installed");
+    let spec = match map.get("version").and_then(Value::as_str) {
+        Some(version) if !package.starts_with("https:") && !package[1..].contains('@') => {
+            format!("{package}@{version}")
+        }
+        _ => package.to_owned(),
+    };
+    let mut command = std::process::Command::new("npm");
+    command
+        .args(["pack", "--ignore-scripts", "--silent", "--pack-destination"])
+        .arg(work)
+        .arg(&spec)
+        .current_dir(work);
+    if let Some(registry) = map.get("registry").and_then(Value::as_str) {
+        command.args(["--registry", registry]);
+    }
+    let output = command.output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "npm pack {spec}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let tarball = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .last()
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let tarball = work.join(tarball);
+    let unpacked = work.join("unpacked");
+    std::fs::create_dir_all(&unpacked)?;
+    let ok = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&unpacked)
+        .status()?;
+    anyhow::ensure!(ok.success(), "couldn't unpack {}", tarball.display());
+    // npm tarballs keep everything under package/.
+    let root = unpacked.join("package");
+    copy_tree(
+        if root.is_dir() { &root } else { &unpacked },
+        into,
+        &mut 0,
+        MAX_PLUGIN_BYTES,
+    )?;
+    Ok((into.to_owned(), spec))
+}
+
+/// `{"source": "command", "command": "...", "timeout": 60}`: a command (run from the home
+/// folder) prints the plugin folder's absolute path. Only with the user's consent.
+fn fetch_command(
+    map: &serde_json::Map<String, Value>,
+    into: &Path,
+    allow: bool,
+) -> anyhow::Result<(PathBuf, String)> {
+    let command = map
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    anyhow::ensure!(!command.is_empty(), "the command source has no command");
+    if !allow {
+        return Err(NeedsCommandConsent(command).into());
+    }
+    let timeout = map
+        .get("timeout")
+        .and_then(Value::as_u64)
+        .unwrap_or(60)
+        .clamp(1, 600);
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
+        .args(if cfg!(windows) {
+            ["/C", command.as_str()]
+        } else {
+            ["-c", command.as_str()]
+        })
+        .current_dir(&home)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let started = std::time::Instant::now();
+    while child.try_wait()?.is_none() {
+        if started.elapsed().as_secs() > timeout {
+            let _ = child.kill();
+            anyhow::bail!("the install command took longer than {timeout}s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let output = child.wait_with_output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "the install command failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    let [path] = lines.as_slice() else {
+        anyhow::bail!("the install command must print exactly one line: the plugin folder's path");
+    };
+    let dir = PathBuf::from(path.trim());
+    anyhow::ensure!(
+        dir.is_absolute() && dir.is_dir(),
+        "{} isn't a folder",
+        dir.display()
+    );
+    copy_tree(&dir, into, &mut 0, 256 << 20)?;
+    Ok((into.to_owned(), String::new()))
 }
 
 /// What installing or updating would run, for the user to approve.
@@ -440,16 +694,31 @@ pub struct Pending {
 /// Fetches a plugin (install or update) and reviews what it would run. Nothing is
 /// installed until `commit_install`.
 pub fn prepare(spec: &str) -> anyhow::Result<Pending> {
+    prepare_with(spec, false)
+}
+
+/// `prepare`, with consent to run an install command (a `command` source) when the
+/// user has seen it. Without it, such a plugin fails with `NeedsCommandConsent`.
+pub fn prepare_with(spec: &str, allow_command: bool) -> anyhow::Result<Pending> {
     let state = State::load();
     let listing = resolve(&state, spec)?;
     let market = &state.marketplaces[&listing.marketplace];
     let work = scratch(&listing.name)?;
-    let (dir, commit) = fetch(&listing, &market.dir, &work.0)?;
+    let (dir, commit) = fetch(&listing, &market.dir, &work.0, allow_command)?;
     let manifest = manifest(&dir, &listing.entry);
     let version = manifest["version"]
         .as_str()
         .map(str::to_owned)
-        .unwrap_or_else(|| commit.chars().take(12).collect());
+        .unwrap_or_else(|| {
+            // Without a manifest version: a short git commit, the npm spec, or a placeholder.
+            if commit.len() >= 40 && commit.chars().all(|c| c.is_ascii_hexdigit()) {
+                commit.chars().take(12).collect()
+            } else if commit.is_empty() {
+                "unversioned".to_owned()
+            } else {
+                commit.clone()
+            }
+        });
     let review = review(&dir, &listing.entry);
     Ok(Pending {
         key: format!("{}@{}", listing.name, listing.marketplace),
@@ -1015,6 +1284,16 @@ mod tests {
             substitute("${CLAUDE_PLUGIN_ROOT}/bin/server", &env),
             format!("{}/bin/server", dir.display())
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn downloads_find_their_plugin_root() {
+        let dir = std::env::temp_dir().join(format!("crack-root-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("inner/skills")).unwrap();
+        assert_eq!(plugin_root(&dir), dir.join("inner"));
+        std::fs::create_dir_all(dir.join(".claude-plugin")).unwrap();
+        assert_eq!(plugin_root(&dir), dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
