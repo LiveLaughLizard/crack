@@ -301,7 +301,7 @@ mod seatbelt_tests {
             .unwrap()
             .join(format!(".crack-sb-test-{}", std::process::id()));
         let run = |command: &str| {
-            let argv = seatbelt_command(command, &[root.clone()], &[], false);
+            let argv = seatbelt_command(command, std::slice::from_ref(&root), &[], false);
             std::process::Command::new(&argv[0])
                 .args(&argv[1..])
                 .status()
