@@ -56,6 +56,8 @@ pub struct Config {
     pub clear_tool_results: Option<bool>,
     /// How many subagents may work at once (default 15); more queue.
     pub max_parallel_agents: Option<usize>,
+    /// How deep subagents may nest: 1 means only the main agent starts them (default 2).
+    pub max_agent_depth: Option<u32>,
     /// The model for `explore` and other "small" subagents (default: a smaller model
     /// from the same provider).
     pub subagent_model: Option<String>,
@@ -254,6 +256,9 @@ impl Config {
         }
         if layer.max_parallel_agents.is_some() {
             self.max_parallel_agents = layer.max_parallel_agents;
+        }
+        if layer.max_agent_depth.is_some() {
+            self.max_agent_depth = layer.max_agent_depth;
         }
         if layer.subagent_model.is_some() {
             self.subagent_model = layer.subagent_model;

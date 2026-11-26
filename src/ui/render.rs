@@ -971,7 +971,7 @@ impl CrackView {
         // Background subagents change without events reaching the window: look again
         // every second while any of them work.
         if !self.team_tick
-            && crate::delegate::list(&self.session.id)
+            && crate::delegate::list_all(&self.session.id)
                 .iter()
                 .any(|i| i.state.busy())
         {
@@ -985,7 +985,9 @@ impl CrackView {
                     // Idle, and a subagent finished or asked something: let the model act on it.
                     if view.running.is_none()
                         && view.ws.config.wake_on_background.unwrap_or(true)
-                        && crate::delegate::needs_attention(&view.session.id)
+                        && crate::delegate::needs_attention(&crate::delegate::main_team(
+                            &view.session.id,
+                        ))
                     {
                         view.start_turn(
                             "Background work you started has news (below). Continue with it."
@@ -1260,7 +1262,7 @@ impl CrackView {
             );
         }
         // Subagents this session started: state, activity, notes; click for the transcript.
-        let team = crate::delegate::list(&self.session.id);
+        let team = crate::delegate::list_all(&self.session.id);
         if !team.is_empty() {
             let busy = team.iter().filter(|i| i.state.busy()).count();
             let mut list = div()

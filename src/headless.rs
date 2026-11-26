@@ -171,7 +171,7 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
         // background_wait_secs) and carry on with it, rather than exit with work in flight.
         let ceiling =
             std::time::Duration::from_secs(workspace.config.background_wait_secs.unwrap_or(600));
-        let team = session.id.clone();
+        let team = crate::delegate::main_team(&session.id);
         let task = tokio::spawn(async move {
             let mut history = agent::run_turn(
                 config.clone(),

@@ -233,6 +233,7 @@ pub(crate) async fn turn_loop(
     // A subagent can talk back to the agent that started it.
     if config.team_link.is_some() {
         specs.push(crate::delegate::message_main_spec());
+        specs.push(crate::delegate::message_agent_spec());
     }
     let mut steps = 0;
     let mut context = config.context_tokens;
@@ -307,7 +308,9 @@ pub(crate) async fn turn_loop(
     added.extend(crate::background::reminder(&ctx.session_id));
     // Subagents: who's working, their notes, and reports not yet seen.
     if config.subagents.is_some() {
-        added.extend(crate::delegate::reminder(&ctx.session_id));
+        added.extend(crate::delegate::reminder(&crate::delegate::team_key(
+            config, ctx,
+        )));
     }
     if !added.is_empty() {
         let text = added.join("\n\n");
@@ -336,7 +339,7 @@ pub(crate) async fn turn_loop(
         // its steps, merged into one message (the turn's first step already has it).
         if steps > 0 && config.subagents.is_some() {
             let news: Vec<String> = [
-                crate::delegate::news(&ctx.session_id),
+                crate::delegate::news(&crate::delegate::team_key(config, ctx)),
                 crate::background::news(&ctx.session_id),
             ]
             .into_iter()
@@ -510,7 +513,9 @@ pub(crate) async fn turn_loop(
                 continue;
             }
             // Likewise the main agent with a finished subagent or a question it hasn't seen.
-            if config.subagents.is_some() && crate::delegate::needs_attention(&ctx.session_id) {
+            if config.subagents.is_some()
+                && crate::delegate::needs_attention(&crate::delegate::team_key(config, ctx))
+            {
                 continue;
             }
             // A Stop hook can send the model back to work (a few times at most).
@@ -658,6 +663,16 @@ pub(crate) async fn turn_loop(
             }
         }
 
+        // A fork continues this conversation: everything before the reply that started it.
+        let forking = prepared
+            .iter()
+            .any(|p| p.name == "task" && p.input["subagent_type"] == json!("fork"));
+        let snapshot: Vec<Message> = if forking {
+            history[..history.len().saturating_sub(1)].to_vec()
+        } else {
+            Vec::new()
+        };
+        let snapshot = &snapshot;
         // 2. Run them: subagents all at once (up to the limit), other tools in order.
         let tasks = futures::future::join_all(
             prepared
@@ -667,9 +682,19 @@ pub(crate) async fn turn_loop(
                 .map(|(i, p)| async move {
                     let output = match &config.subagents {
                         Some(env) if p.name == "task" => {
-                            crate::delegate::run(config, env, ctx, &p.id, &p.input, events).await
+                            crate::delegate::run(
+                                config, env, ctx, &p.id, &p.input, events, snapshot,
+                            )
+                            .await
                         }
-                        Some(_) => crate::delegate::team_tool(&p.name, &p.input, ctx).await,
+                        Some(_) => {
+                            crate::delegate::team_tool(
+                                &p.name,
+                                &p.input,
+                                &crate::delegate::team_key(config, ctx),
+                            )
+                            .await
+                        }
                         None => tools::ToolOutput::error(
                             "Subagents can't start subagents of their own.",
                             tools::title(&p.name, &p.input),
@@ -687,6 +712,7 @@ pub(crate) async fn turn_loop(
             {
                 let output = match (&config.team_link, p.name.as_str()) {
                     (Some(link), "message_main") => crate::delegate::message_main(link, &p.input),
+                    (Some(link), "message_agent") => crate::delegate::message_agent(link, &p.input),
                     _ => tools::run(&p.name, &p.input, ctx, config.agent).await,
                 };
                 done.push((i, output));

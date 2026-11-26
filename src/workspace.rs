@@ -124,15 +124,18 @@ impl Workspace {
                     )),
                     mcp: Some(self.mcp.clone()),
                 }),
-            subagents: Some(std::sync::Arc::new(crate::delegate::SubagentEnv::new(
-                self.registry.clone(),
-                &self.cwd,
-                model_ref.to_owned(),
-                self.config.subagent_model.clone(),
-                self.instructions.clone(),
-                self.config.max_parallel_agents.unwrap_or(15),
-                self.config.subagent_max_steps.unwrap_or(60),
-            ))),
+            subagents: Some(std::sync::Arc::new(
+                crate::delegate::SubagentEnv::new(
+                    self.registry.clone(),
+                    &self.cwd,
+                    model_ref.to_owned(),
+                    self.config.subagent_model.clone(),
+                    self.instructions.clone(),
+                    self.config.max_parallel_agents.unwrap_or(15),
+                    self.config.subagent_max_steps.unwrap_or(60),
+                )
+                .with_max_depth(self.config.max_agent_depth.unwrap_or(2)),
+            )),
             model,
             system,
             effort: selection.effort,

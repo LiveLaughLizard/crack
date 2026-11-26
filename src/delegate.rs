@@ -28,7 +28,7 @@ pub const TEAM_TOOLS: &[&str] = &[
     "stop_agent",
 ];
 
-/// What a turn needs to start subagents. Absent inside a subagent (depth 1).
+/// What a turn needs to start subagents. Absent once agents may nest no deeper.
 pub struct SubagentEnv {
     pub registry: crate::providers::registry::Registry,
     pub defs: Vec<AgentDef>,
@@ -38,6 +38,10 @@ pub struct SubagentEnv {
     pub max_parallel: usize,
     pub max_steps: u32,
     pub limit: Arc<tokio::sync::Semaphore>,
+    /// How deep this level is (the main agent's agents are at 1) and how deep agents
+    /// may nest.
+    pub depth: u32,
+    pub max_depth: u32,
 }
 
 impl SubagentEnv {
@@ -60,7 +64,34 @@ impl SubagentEnv {
             max_parallel,
             max_steps,
             limit: Arc::new(tokio::sync::Semaphore::new(max_parallel)),
+            depth: 0,
+            max_depth: 2,
         }
+    }
+
+    /// How deep agents may nest (1: only the main agent starts them; at most 5).
+    pub fn with_max_depth(mut self, max_depth: u32) -> SubagentEnv {
+        self.max_depth = max_depth.clamp(1, 5);
+        self
+    }
+
+    /// What an agent started from here may use to start its own, if nesting allows. Each
+    /// level has its own slots, so agents waiting on their children never starve them.
+    pub fn child(&self) -> Option<Arc<SubagentEnv>> {
+        (self.depth + 1 < self.max_depth).then(|| {
+            Arc::new(SubagentEnv {
+                registry: self.registry.clone(),
+                defs: self.defs.clone(),
+                parent_model: self.parent_model.clone(),
+                small_model: self.small_model.clone(),
+                instructions: self.instructions.clone(),
+                max_parallel: self.max_parallel,
+                max_steps: self.max_steps,
+                limit: Arc::new(tokio::sync::Semaphore::new(self.max_parallel)),
+                depth: self.depth + 1,
+                max_depth: self.max_depth,
+            })
+        })
     }
 
     /// `task` and the team tools, listing the agents `task` can start.
@@ -73,6 +104,10 @@ impl SubagentEnv {
         {
             listing.push_str(&format!("- {}: {}\n", def.name, def.description));
         }
+        listing.push_str(
+            "- fork: a copy of you that continues from this conversation, on your model, to take one \
+             branch of the work. Its prompt only needs the branch: it already knows everything said so far.\n",
+        );
         let spec = |name: &str, description: String, schema: Value| ToolSpec {
             name: name.into(),
             description,
@@ -143,15 +178,85 @@ impl SubagentEnv {
             ),
             spec(
                 "stop_agent",
-                "Stop a subagent now. Its transcript stays; work in progress may be incomplete.".into(),
+                "Stop a subagent: it's asked to wrap up and report what it has, and stopped if it hasn't within 90 \
+                 seconds. With force it stops at once (work in progress may be lost). Its transcript stays."
+                    .into(),
                 json!({
                     "type": "object",
-                    "properties": {"id": {"type": "string", "description": "The agent's id or name."}},
+                    "properties": {
+                        "id": {"type": "string", "description": "The agent's id or name."},
+                        "force": {"type": "boolean", "description": "Stop it at once instead of asking it to wrap up first."}
+                    },
                     "required": ["id"]
                 }),
             ),
         ]
     }
+}
+
+/// A subagent's tool for messaging its siblings (agents started by the same parent).
+pub fn message_agent_spec() -> ToolSpec {
+    ToolSpec {
+        name: "message_agent".into(),
+        description: "Send a message to another working agent started by the same parent as you (by id or \
+                      name): to share a finding it needs, split work, or avoid doing the same thing twice. \
+                      It sees the message at its next step. Use message_main for the agent that started you."
+            .into(),
+        schema: json!({
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "The agent's id (a1, a2, ...) or name."},
+                "message": {"type": "string"}
+            },
+            "required": ["to", "message"]
+        }),
+    }
+}
+
+/// The `message_agent` tool: delivers to a sibling's inbox, signed by crack.
+pub fn message_agent(link: &Link, input: &Value) -> ToolOutput {
+    let to = input["to"].as_str().unwrap_or_default();
+    let message = input["message"].as_str().unwrap_or_default().trim();
+    let title = format!("Message \u{2192} {to}");
+    if message.is_empty() {
+        return ToolOutput::error("The message is empty.", title);
+    }
+    let (sender_id, sender) = {
+        let i = lock(&link.info);
+        (i.id.clone(), i.label())
+    };
+    let Some((info, inbox, _)) = find(&link.team, to) else {
+        return ToolOutput::error(
+            format!("No agent '{to}' among the ones your parent started."),
+            title,
+        );
+    };
+    let (target_id, label, busy) = {
+        let i = lock(&info);
+        (i.id.clone(), i.label(), i.state.busy())
+    };
+    if target_id == sender_id {
+        return ToolOutput::error("That's you.", title);
+    }
+    if !busy {
+        return ToolOutput::error(
+            format!(
+                "{label} has finished and exited; tell the agent that started you instead (message_main)."
+            ),
+            title,
+        );
+    }
+    inbox
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((format!("agent {sender}"), bounded(message)));
+    ToolOutput::ok(
+        format!("Sent to {label}; it sees it at its next step."),
+        ToolMeta {
+            title,
+            ..Default::default()
+        },
+    )
 }
 
 /// The subagent's own tool for talking back.
@@ -260,7 +365,19 @@ impl Info {
 }
 
 /// Messages from the main agent, waiting for the subagent's next step.
-pub type Inbox = Arc<Mutex<Vec<String>>>;
+/// (sender, text): the sender is set by crack, never taken from the message.
+pub type Inbox = Arc<Mutex<Vec<(String, String)>>>;
+
+/// The longest message one agent can send another.
+const MAX_MESSAGE: usize = 40_000;
+
+fn bounded(text: &str) -> String {
+    if text.chars().count() <= MAX_MESSAGE {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(MAX_MESSAGE).collect();
+    format!("{kept}\n[... cut at {MAX_MESSAGE} characters]")
+}
 
 struct Member {
     info: Arc<Mutex<Info>>,
@@ -268,6 +385,22 @@ struct Member {
     /// Bumped on every change worth waking a waiter for (a note, the end).
     changed: watch::Receiver<u64>,
     task: tokio::task::AbortHandle,
+}
+
+/// The team a turn manages: the session plus who started its agents (`main`, or the
+/// subagent that started nested ones). Each agent sees only its own team.
+pub fn team_key(config: &TurnConfig, ctx: &ToolContext) -> String {
+    let owner = config
+        .team_link
+        .as_ref()
+        .map(|l| lock(&l.info).id.clone())
+        .unwrap_or_else(|| "main".into());
+    format!("{}#{owner}", ctx.session_id)
+}
+
+/// The main agent's team in a session.
+pub fn main_team(session: &str) -> String {
+    format!("{session}#main")
 }
 
 /// Each session's team: (session id, members).
@@ -302,22 +435,37 @@ fn find(session: &str, key: &str) -> Option<(Arc<Mutex<Info>>, Inbox, watch::Rec
     })
 }
 
-/// A session's team, oldest first.
-pub fn list(session: &str) -> Vec<Info> {
-    with_team(session, |team| {
-        team.iter().map(|m| lock(&m.info).clone()).collect()
+/// A team, oldest first.
+pub fn list(team: &str) -> Vec<Info> {
+    with_team(team, |members| {
+        members.iter().map(|m| lock(&m.info).clone()).collect()
     })
 }
 
-/// Stops a session's whole team (its tab closed, or its run ended).
+/// Every agent in a session, nested ones included (for the sidebar).
+pub fn list_all(session: &str) -> Vec<Info> {
+    let prefix = format!("{session}#");
+    let teams = TEAMS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all: Vec<Info> = teams
+        .iter()
+        .filter(|(key, _)| key.starts_with(&prefix))
+        .flat_map(|(_, members)| members.iter().map(|m| lock(&m.info).clone()))
+        .collect();
+    all.sort_by_key(|i| i.started);
+    all
+}
+
+/// Stops every agent of a session, nested ones included (its tab closed, or its run
+/// ended).
 pub fn stop_session(session: &str) {
+    let prefix = format!("{session}#");
     let mut teams = TEAMS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(pos) = teams.iter().position(|(s, _)| s == session) {
-        for member in &teams[pos].1 {
+    for (_, members) in teams.iter().filter(|(key, _)| key.starts_with(&prefix)) {
+        for member in members {
             member.task.abort();
         }
-        teams.remove(pos);
     }
+    teams.retain(|(key, _)| !key.starts_with(&prefix));
 }
 
 /// Stops every team (crack is exiting).
@@ -459,6 +607,8 @@ pub fn reminder(session: &str) -> Option<String> {
 pub struct Link {
     pub info: Arc<Mutex<Info>>,
     pub inbox: Inbox,
+    /// The team it belongs to: its siblings, for `message_agent`.
+    pub team: String,
     changed: Arc<watch::Sender<u64>>,
 }
 
@@ -469,12 +619,12 @@ impl Link {
 
     /// Messages from the main agent since the last step, as text for the subagent.
     pub fn take_messages(&self) -> Option<String> {
-        let messages: Vec<String> =
+        let messages: Vec<(String, String)> =
             std::mem::take(&mut *self.inbox.lock().unwrap_or_else(|e| e.into_inner()));
         (!messages.is_empty()).then(|| {
             messages
                 .iter()
-                .map(|m| format!("<message_from_main_agent>\n{m}\n</message_from_main_agent>"))
+                .map(|(from, m)| format!("<message from=\"{from}\">\n{m}\n</message>"))
                 .collect::<Vec<_>>()
                 .join("\n")
         })
@@ -535,6 +685,7 @@ fn start(
     call_id: &str,
     input: &Value,
     events: &Events,
+    parent_history: &[Message],
 ) -> Result<(Arc<Mutex<Info>>, watch::Receiver<u64>), String> {
     let description = input["description"].as_str().unwrap_or("task").to_owned();
     let prompt = input["prompt"].as_str().unwrap_or_default().to_owned();
@@ -548,7 +699,21 @@ fn start(
         .filter(|s| !s.is_empty())
         .unwrap_or("general")
         .to_owned();
-    let Some(def) = env.defs.iter().find(|d| d.name == kind).cloned() else {
+    // A fork is the general agent carrying on from this conversation; it can't fork again.
+    let fork = kind == "fork";
+    if fork
+        && config
+            .team_link
+            .as_ref()
+            .is_some_and(|l| lock(&l.info).kind == "fork")
+    {
+        return Err(
+            "A fork can't fork again; do the work, or start a fresh agent with a full prompt."
+                .into(),
+        );
+    }
+    let lookup = if fork { "general" } else { kind.as_str() };
+    let Some(def) = env.defs.iter().find(|d| d.name == lookup).cloned() else {
         let names: Vec<&str> = env.defs.iter().map(|d| d.name.as_str()).collect();
         return Err(format!(
             "No agent named '{kind}'. Available: {}",
@@ -563,7 +728,7 @@ fn start(
     if prompt.trim().is_empty() {
         return Err("The prompt is empty.".into());
     }
-    let session_key = ctx.session_id.clone();
+    let session_key = team_key(config, ctx);
     if let Some(name) = &name
         && list(&session_key)
             .iter()
@@ -573,15 +738,24 @@ fn start(
             "An agent named '{name}' is already working; pick another name."
         ));
     }
-    let model_ref = crate::subagents::choose_model(
-        &def,
-        &env.parent_model,
-        &env.registry,
-        env.small_model.as_deref(),
-    );
-    let (endpoint, model) = match env.registry.resolve(&model_ref) {
-        Ok((p, m)) => (p.endpoint.clone(), m),
-        Err(error) => return Err(format!("Can't start {kind}: {error:#}")),
+    // A fork always runs on the model whose conversation it continues.
+    let (model_ref, endpoint, model) = if fork {
+        (
+            config.model_ref.clone(),
+            config.endpoint.clone(),
+            config.model.clone(),
+        )
+    } else {
+        let model_ref = crate::subagents::choose_model(
+            &def,
+            &env.parent_model,
+            &env.registry,
+            env.small_model.as_deref(),
+        );
+        match env.registry.resolve(&model_ref) {
+            Ok((p, m)) => (model_ref, p.endpoint.clone(), m),
+            Err(error) => return Err(format!("Can't start {kind}: {error:#}")),
+        }
     };
     let worktree = if def.worktree && config.agent == Agent::Build {
         match Worktree::create(&ctx.cwd, call_id) {
@@ -596,14 +770,30 @@ fn start(
         .map(|w| w.path.clone())
         .unwrap_or_else(|| ctx.cwd.clone());
 
-    let mut system = crate::context::SystemPrompt {
-        cwd: &cwd,
-        agent: Agent::Build,
-        model: &model_ref,
-        instructions: &env.instructions,
-        skills: &ctx.skills,
+    let mut system = if fork {
+        config.system.clone()
+    } else {
+        crate::context::SystemPrompt {
+            cwd: &cwd,
+            agent: Agent::Build,
+            model: &model_ref,
+            instructions: &env.instructions,
+            skills: &ctx.skills,
+        }
+        .render()
+    };
+    if fork {
+        system.push_str(
+            "\n# You are a fork\nYou are a copy of the agent whose conversation you see, started to take one \
+             branch of its work (the last message). Do that branch yourself, directly; don't hand it on.\n",
+        );
     }
-    .render();
+    // A fork starts from the conversation so far (minus the call that started it).
+    let initial: Vec<Message> = if fork {
+        parent_history.to_vec()
+    } else {
+        Vec::new()
+    };
     system.push_str(
         "\n# Your role\nYou are a subagent: another agent started you for this task and may run others alongside you. \
          Keep it informed with message_main: a short note at real milestones, as soon as you find something it \
@@ -620,7 +810,8 @@ fn start(
         policy.cwd = w.path.clone();
     }
 
-    let id = with_team(&session_key, |team| format!("a{}", team.len() + 1));
+    // Ids are unique across the session, nested agents included.
+    let id = format!("a{}", list_all(&ctx.session_id).len() + 1);
     let mut session = Session::new(&cwd);
     session.id = format!("sub-{}", session.id);
     session.title = format!("\u{21b3} {description}");
@@ -645,6 +836,7 @@ fn start(
     let link = Arc::new(Link {
         info: info.clone(),
         inbox: inbox.clone(),
+        team: session_key.clone(),
         changed: Arc::new(changed_tx),
     });
 
@@ -674,13 +866,15 @@ fn start(
         clear_tool_results: config.clear_tool_results,
         server_web_search: config.server_web_search,
         context_tokens: 0,
-        subagents: None,
+        // Agents may start their own, down to max_agent_depth.
+        subagents: env.child(),
         team_link: Some(link.clone()),
     };
     let sub_ctx = ToolContext {
         cwd: cwd.clone(),
         allow: def.tools.clone().map(|mut tools| {
             tools.push("message_main".into());
+            tools.push("message_agent".into());
             tools
         }),
         todos: Arc::new(Mutex::new(Vec::new())),
@@ -750,7 +944,8 @@ fn start(
         if !start.context.is_empty() {
             prompt.push_str(&format!("\n\n{}", start.context.join("\n\n")));
         }
-        let mut history = vec![Message::user_text(prompt)];
+        let mut history = initial;
+        history.push(Message::user_text(prompt));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let started = Instant::now();
         let work = async {
@@ -925,6 +1120,7 @@ pub async fn run(
     call_id: &str,
     input: &Value,
     events: &Events,
+    parent_history: &[Message],
 ) -> ToolOutput {
     let description = input["description"].as_str().unwrap_or("task");
     let kind = input["subagent_type"]
@@ -932,7 +1128,8 @@ pub async fn run(
         .filter(|s| !s.is_empty())
         .unwrap_or("general");
     let title = format!("Task: {description} ({kind})");
-    let (info, mut changed) = match start(config, env, ctx, call_id, input, events) {
+    let (info, mut changed) = match start(config, env, ctx, call_id, input, events, parent_history)
+    {
         Ok(started) => started,
         Err(error) => return ToolOutput::error(error, title),
     };
@@ -962,7 +1159,7 @@ pub async fn run(
         );
     }
     let mut guard = StopOnDrop {
-        session: ctx.session_id.clone(),
+        session: team_key(config, ctx),
         id: id.clone(),
         armed: true,
     };
@@ -983,7 +1180,7 @@ pub async fn run(
     let report = i.report.clone();
     let state = i.state.clone();
     drop(i);
-    let patch = take_patch(&ctx.session_id, &id);
+    let patch = take_patch(&team_key(config, ctx), &id);
     let kind = if patch.is_some() {
         DisplayKind::Diff
     } else {
@@ -1012,8 +1209,8 @@ pub async fn run(
 }
 
 /// The main agent's team tools: send_message, agent_status, wait_for_agents, stop_agent.
-pub async fn team_tool(name: &str, input: &Value, ctx: &ToolContext) -> ToolOutput {
-    let session = ctx.session_id.as_str();
+pub async fn team_tool(name: &str, input: &Value, team: &str) -> ToolOutput {
+    let session = team;
     let ok = |content: String, title: String| {
         ToolOutput::ok(
             content,
@@ -1054,7 +1251,7 @@ pub async fn team_tool(name: &str, input: &Value, ctx: &ToolContext) -> ToolOutp
             inbox
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(message.to_owned());
+                .push(("the agent that started you".into(), bounded(message)));
             ok(
                 format!(
                     "Sent to {label}; it sees the message at its next step. Its reply or report comes through agent_status / wait_for_agents."
@@ -1229,11 +1426,42 @@ pub async fn team_tool(name: &str, input: &Value, ctx: &ToolContext) -> ToolOutp
             )
         }
         "stop_agent" => {
-            let key = input["id"].as_str().unwrap_or_default();
-            match stop(session, key) {
-                Some(label) => ok(format!("Stopped {label}."), format!("Stop {label}")),
-                None => ToolOutput::error(format!("No subagent '{key}'."), "Stop agent".into()),
+            let key = input["id"].as_str().unwrap_or_default().to_owned();
+            let Some((info, inbox, _)) = find(session, &key) else {
+                return ToolOutput::error(format!("No subagent '{key}'."), "Stop agent".into());
+            };
+            let (label, busy) = {
+                let i = lock(&info);
+                (i.label(), i.state.busy())
+            };
+            if !busy {
+                return ok(
+                    format!("{label} has already finished."),
+                    format!("Stop {label}"),
+                );
             }
+            if input["force"].as_bool() == Some(true) {
+                stop(session, &key);
+                return ok(format!("Stopped {label}."), format!("Stop {label}"));
+            }
+            // Gracefully: ask it to wrap up, and stop it if it hasn't reported in 90 seconds.
+            inbox.lock().unwrap_or_else(|e| e.into_inner()).push((
+                "the agent that started you".into(),
+                "Please wrap up now: don't start anything new, and send your report with what you have, \
+                 including what's left undone."
+                    .into(),
+            ));
+            let (team, id) = (session.to_owned(), key.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(90)).await;
+                stop(&team, &id);
+            });
+            ok(
+                format!(
+                    "Asked {label} to wrap up and report; it will be stopped in 90 seconds if it hasn't."
+                ),
+                format!("Stop {label}"),
+            )
         }
         other => ToolOutput::error(format!("Unknown team tool {other}"), other.to_owned()),
     }

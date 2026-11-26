@@ -452,8 +452,15 @@ the same time: up to `max_parallel_agents` (default 15) work at once, and the re
 - Agents report back while they work with `message_main`: progress at milestones,
   findings to act on now, questions, blockers.
 - `agent_status` shows each one's activity, steps, notes and report;
-  `wait_for_agents` waits for reports (or, with `until: any_note`, the first note);
-  `stop_agent` ends one.
+  `wait_for_agents` waits for reports (or, with `until: any_note`, the first note).
+- `stop_agent` asks an agent to wrap up and report what it has, and stops it if it
+  hasn't within 90 seconds (`force: true` stops it at once).
+- Agents started by the same parent can message each other with `message_agent`. crack
+  stamps who sent it, so one agent can't pass itself off as another; messages are capped
+  at 40,000 characters.
+- Agents can start their own agents, down to `max_agent_depth` levels (default 2; 1
+  means only the main agent starts them). Each agent sees and steers only the agents it
+  started, and each level has its own `max_parallel_agents` slots.
 - Before each turn the main agent is told what's working, new notes, and reports it
   hasn't read.
 - Between its steps, finished reports, new notes and finished background commands reach
@@ -469,6 +476,9 @@ it finishes is handled first. The sidebar's Agents section lists the team with e
 agent's state and latest activity; click one for its transcript.
 
 **Built-in agents:**
+- **`fork`:** a copy of the main agent that continues from the conversation so far, on
+  the same model, to take one branch of the work. Its prompt only needs the branch. A
+  fork can't fork again.
 - **`explore`:** read-only codebase search. It uses a smaller, faster model from the
   same provider (Haiku for Claude, a mini or flash model elsewhere), unless you set
   `subagent_model`.
@@ -497,7 +507,6 @@ apply, so parallel agents can't overwrite each other or your work.
 
 **Limits:**
 - Subagents ask for approval through the same card as the main agent.
-- They can't start subagents of their own.
 - Each one stops after `subagent_max_steps` model requests (default 60).
 - Their tokens count toward the session's cost.
 - Interrupting the turn stops the agents it was waiting for; background agents keep
