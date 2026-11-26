@@ -13,8 +13,8 @@
 //! toward each hidden path and granting every sibling on the way. The directories on
 //! the way get listing rights only, so a hidden file's name may show, never its contents.
 //!
-//! On Windows the helper can't lock itself down; it starts the command in an
-//! AppContainer instead and waits for it (see `sandbox_windows.rs`).
+//! On Windows the helper can't lock itself down; it starts the command with a
+//! low-integrity token instead and waits for it (see `sandbox_windows.rs`).
 
 use std::path::{Path, PathBuf};
 
@@ -84,8 +84,8 @@ pub fn command(
     Some(argv)
 }
 
-/// The helper: lock down, then become the command (on Windows: start it in an
-/// AppContainer and pass on its exit code). Never returns.
+/// The helper: lock down, then become the command (on Windows: start it with a
+/// low-integrity token and pass on its exit code). Never returns.
 pub fn run_helper(args: &[String]) -> ! {
     let mut writable = Vec::new();
     let mut hidden = Vec::new();
@@ -107,8 +107,8 @@ pub fn run_helper(args: &[String]) -> ! {
     if program.is_empty() {
         fail("no command given");
     }
-    // Windows: the command runs in an AppContainer, which can't read the user's
-    // profile at all, so `hidden` isn't needed.
+    // Windows: nothing can be hidden from a low-integrity process (see
+    // sandbox_windows.rs), so `hidden` is unused.
     #[cfg(windows)]
     {
         let _ = hidden;

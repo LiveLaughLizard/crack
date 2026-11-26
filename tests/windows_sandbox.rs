@@ -1,5 +1,6 @@
 //! The Windows sandbox, through the real helper (`crack __sandbox-exec`): commands
-//! write inside the shared folder and nowhere else, and `--no-network` cuts them off.
+//! write inside the shared folder and nowhere else, Git Bash runs in it (beside an
+//! open one too), and `--no-network` is refused because Windows can't honour it.
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
@@ -11,11 +12,12 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+const GIT_BASH: &str = "C:\\Program Files\\Git\\bin\\bash.exe";
+
 /// Git Bash, as on the CI runner; PowerShell otherwise.
 fn shell(command: &str) -> Vec<String> {
-    let bash = Path::new("C:\\Program Files\\Git\\bin\\bash.exe");
-    if bash.is_file() {
-        vec![bash.display().to_string(), "-c".into(), command.into()]
+    if Path::new(GIT_BASH).is_file() {
+        vec![GIT_BASH.into(), "-c".into(), command.into()]
     } else {
         vec![
             "powershell".into(),
@@ -41,6 +43,8 @@ fn sandboxed(writable: &Path, network: bool, program: &[String]) -> (i32, String
         .unwrap();
     let text = String::from_utf8_lossy(&output.stdout).into_owned()
         + &String::from_utf8_lossy(&output.stderr);
+    // Readable in a CI annotation.
+    let text = text.replace(|c: char| c.is_control() && c != '\n', "");
     (output.status.code().unwrap_or(-1), text)
 }
 
@@ -49,7 +53,6 @@ fn slashes(path: &Path) -> String {
 }
 
 #[test]
-#[ignore = "Git Bash (MSYS2) can't start inside an AppContainer (0xC0000142), and NUL is denied there; being replaced with a restricted-token sandbox. Until then the probe fails and commands ask first."]
 fn writes_stay_in_the_shared_folder() {
     let project = scratch("project");
     let inside = project.join("made-inside.txt");
@@ -108,18 +111,85 @@ fn writes_stay_in_the_shared_folder() {
     let _ = std::fs::remove_dir_all(&other);
 }
 
+/// Ordinary commands work: other programs, pipes, `NUL`, temporary files.
 #[test]
-#[ignore = "Git Bash (MSYS2) can't start inside an AppContainer (0xC0000142), and NUL is denied there; being replaced with a restricted-token sandbox. Until then the probe fails and commands ask first."]
-fn no_network_blocks_connections() {
+fn ordinary_commands_work() {
+    let project = scratch("ordinary");
+    std::fs::write(project.join("a.txt"), "hello\n").unwrap();
+    let (code, output) = sandboxed(
+        &project,
+        true,
+        &shell(
+            "ls | wc -l; cat a.txt; echo x > /dev/null; echo y > NUL; t=$(mktemp) && echo tmp > \"$t\" && cat \"$t\" && rm \"$t\"",
+        ),
+    );
+    assert_eq!(code, 0, "{output}");
+    assert!(
+        output.contains("hello") && output.contains("tmp"),
+        "{output}"
+    );
+    let (code, output) = sandboxed(
+        &project,
+        true,
+        &[
+            "cmd".into(),
+            "/c".into(),
+            "echo hi> NUL && echo cmd-ok".into(),
+        ],
+    );
+    assert_eq!(code, 0, "{output}");
+    assert!(output.contains("cmd-ok"), "{output}");
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// A Git Bash the user has open (not sandboxed, started first) doesn't stop one
+/// starting in the sandbox, nor do two sandboxed ones at once.
+#[test]
+fn git_bash_starts_beside_others() {
+    if !Path::new(GIT_BASH).is_file() {
+        return;
+    }
+    let project = scratch("beside");
+    let mut open = Command::new(GIT_BASH)
+        .args(["-c", "sleep 20"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let (code, output) = sandboxed(&project, true, &shell("ls | wc -l; echo first"));
+    let other = project.clone();
+    let second = std::thread::spawn(move || {
+        sandboxed(&other, true, &shell("sleep 2; ls | wc -l; echo second"))
+    });
+    let (code3, output3) = sandboxed(&project, true, &shell("sleep 1; ls | wc -l; echo third"));
+    let (code2, output2) = second.join().unwrap();
+    let _ = open.kill();
+    let _ = open.wait();
+    assert_eq!(code, 0, "beside an open Git Bash: {output}");
+    assert_eq!(code2, 0, "two at once: {output2}");
+    assert_eq!(code3, 0, "two at once: {output3}");
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// Windows has no admin-free way to cut a process off the network, so the helper
+/// refuses `--no-network` rather than run the command connected (crack asks before
+/// commands instead when sandbox network is blocked). With the network allowed,
+/// commands connect.
+#[test]
+fn no_network_is_refused_not_ignored() {
     let project = scratch("network");
+    let marker = project.join("ran.txt");
+    let (code, output) = sandboxed(
+        &project,
+        false,
+        &shell(&format!("echo ran > \"{}\"", slashes(&marker))),
+    );
+    assert_ne!(code, 0, "{output}");
+    assert!(!marker.exists(), "ran with --no-network: {output}");
+    assert!(output.contains("can't block"), "{output}");
+
     let curl = PathBuf::from(std::env::var("SystemRoot").unwrap()).join("System32\\curl.exe");
-    let curl = curl.display().to_string();
-    // curl itself runs in the sandbox...
-    let (code, output) = sandboxed(&project, false, &[curl.clone(), "--version".into()]);
-    assert_eq!(code, 0, "curl didn't run in the sandbox: {output}");
-    // ...but can't connect without the network (by address, so DNS isn't the test).
     let fetch = [
-        curl.clone(),
+        curl.display().to_string(),
         "-sS".into(),
         "-m".into(),
         "15".into(),
@@ -127,9 +197,6 @@ fn no_network_blocks_connections() {
         "NUL".into(),
         "https://1.1.1.1".into(),
     ];
-    let (code, output) = sandboxed(&project, false, &fetch);
-    assert_ne!(code, 0, "connected with the network blocked: {output}");
-    // With the network allowed, it connects.
     let (code, output) = sandboxed(&project, true, &fetch);
     assert_eq!(
         code, 0,
@@ -139,7 +206,6 @@ fn no_network_blocks_connections() {
 }
 
 #[test]
-#[ignore = "Git Bash (MSYS2) can't start inside an AppContainer (0xC0000142), and NUL is denied there; being replaced with a restricted-token sandbox. Until then the probe fails and commands ask first."]
 fn exit_codes_pass_through() {
     let project = scratch("exit");
     let (code, output) = sandboxed(&project, true, &shell("exit 7"));

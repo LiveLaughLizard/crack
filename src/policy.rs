@@ -857,7 +857,7 @@ pub enum Answer {
 pub struct Sandbox {
     /// Wanted: forced by the build, or the user's toggle, config, or the default (on).
     pub wanted: bool,
-    /// A sandbox works here (Landlock, Seatbelt, an AppContainer or bubblewrap).
+    /// A sandbox works here (Landlock, Seatbelt, low integrity on Windows, or bubblewrap).
     pub available: bool,
     /// This build forces the sandbox (`force-sandbox`); it can't be turned off.
     pub forced: bool,
@@ -903,18 +903,32 @@ impl Sandbox {
                 .iter()
                 .map(|p| crate::config::expand_home(p)),
         );
+        let network = state
+            .sandbox_network
+            .or(config.sandbox_network)
+            .unwrap_or(true);
         Sandbox {
             wanted,
+            // The Windows sandbox can't block the network, so with network blocked
+            // there's no sandbox there and commands ask first.
             available: crate::sandbox::native_available()
                 || crate::sandbox::seatbelt_available()
-                || crate::sandbox::windows_available()
+                || (network && crate::sandbox::windows_available())
                 || bwrap_installed(),
             forced,
-            network: state
-                .sandbox_network
-                .or(config.sandbox_network)
-                .unwrap_or(true),
+            network,
             writable,
+        }
+    }
+
+    /// Why commands can't be sandboxed here (when they can't), for display.
+    pub fn missing(&self) -> &'static str {
+        if !cfg!(windows) {
+            "bwrap is missing"
+        } else if !self.network && crate::sandbox::windows_available() {
+            "Windows can't block the network"
+        } else {
+            "the Windows sandbox didn't work here"
         }
     }
 
@@ -930,7 +944,7 @@ impl Sandbox {
         } else if crate::sandbox::seatbelt_available() {
             "sandbox-exec"
         } else if crate::sandbox::windows_available() {
-            "AppContainer"
+            "low integrity"
         } else if bwrap_installed() {
             "bubblewrap"
         } else {
@@ -961,7 +975,7 @@ pub fn hidden_paths() -> Vec<PathBuf> {
 
 /// Wraps a shell command so it runs sandboxed: the system read-only, the project,
 /// /tmp and package caches writable, secrets hidden, and no network unless allowed.
-/// Uses Seatbelt on macOS, an AppContainer on Windows, and on Linux the built-in
+/// Uses Seatbelt on macOS, a low-integrity token on Windows, and on Linux the built-in
 /// sandbox (Landlock) where the kernel has it, else bubblewrap.
 pub fn sandboxed(command: &str, settings: &Sandbox, root: &Path) -> Option<Vec<String>> {
     if crate::sandbox::seatbelt_available() {
@@ -988,7 +1002,8 @@ pub fn sandboxed(command: &str, settings: &Sandbox, root: &Path) -> Option<Vec<S
         return crate::sandbox::command(command, &writable, &hidden_paths(), settings.network);
     }
     if crate::sandbox::windows_available() {
-        // The container gets its own temporary folder, and can't read the profile.
+        // Commands get a shared temporary folder; nothing can be hidden (see
+        // sandbox_windows.rs).
         let mut writable = vec![root.to_owned()];
         writable.extend(settings.writable.iter().filter(|p| p.exists()).cloned());
         return crate::sandbox::command(command, &writable, &[], settings.network);

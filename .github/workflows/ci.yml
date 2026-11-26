@@ -98,9 +98,24 @@ jobs:
           set +e
           cargo test 2>&1 | tee test.txt
           status=${PIPESTATUS[0]}
-          blocks=$(grep -E -A6 "panicked at|^test .* FAILED|^error" test.txt | head -80 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          blocks=$(grep -a -E -A6 "panicked at|^test .* FAILED|^error" test.txt | head -80 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
           [ -n "$blocks" ] && echo "::error title=tests::$blocks"
           exit $status
+
+      # The step above runs under Git Bash, so its sandbox tests run beside an open
+      # Git Bash; these run with none.
+      - name: Windows sandbox tests with no Git Bash open
+        if: runner.os == 'Windows' && !cancelled()
+        shell: pwsh
+        run: |
+          $out = cargo test --test windows_sandbox 2>&1 | Out-String
+          $status = $LASTEXITCODE
+          Write-Output $out
+          if ($status -ne 0) {
+            $lines = ($out -split "`r?`n" | Select-String -Pattern 'panicked at' -Context 0,4 | ForEach-Object { $_.ToString() -replace "`r?`n", "%0A" }) -join '%0A'
+            Write-Output "::error title=sandbox tests (PowerShell)::$lines"
+            exit 1
+          }
 
       - name: Headless smoke test against the mock
         shell: bash

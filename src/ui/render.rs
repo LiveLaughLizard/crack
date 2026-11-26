@@ -1237,10 +1237,14 @@ impl CrackView {
                 ),
                 theme::success(),
             ),
-            (true, false) if sandbox.forced => {
-                ("required, but bwrap is missing".to_owned(), theme::error())
-            }
-            (true, false) => ("bwrap missing: commands ask".to_owned(), theme::warning()),
+            (true, false) if sandbox.forced => (
+                format!("required, but {}", sandbox.missing()),
+                theme::error(),
+            ),
+            (true, false) => (
+                format!("{}: commands ask", sandbox.missing()),
+                theme::warning(),
+            ),
             (false, _) => ("off".to_owned(), theme::warning()),
         };
         let mode_color = match self.selection.mode {

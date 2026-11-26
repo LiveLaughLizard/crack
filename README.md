@@ -709,11 +709,24 @@ nothing to install, on kernel 5.13 or later). On older kernels it uses
 [bubblewrap](https://github.com/containers/bubblewrap) if installed, and otherwise asks
 before commands.
 
-On Windows, crack tries to sandbox commands in an AppContainer, but that doesn't work in
-practice yet: Git Bash can't start inside one, and the `NUL` device is off limits there.
-crack checks this once at startup and, finding it doesn't work, asks before commands
-outside the safe list, as it always has. A sandbox built on a restricted, low-integrity
-token is in progress.
+On Windows, commands run as you but at **low integrity**, with your privileges
+dropped. Windows doesn't let a low-integrity program change anything labelled higher,
+and everything is by default, so commands can write only to the project, the package
+caches and a shared `crack-sandbox` temporary folder, which crack labels low the first
+time (that label stays on those folders). It's weaker than on Linux and macOS:
+- Commands can still *read* everything you can, keys and credentials included.
+- Windows can't cut a program off the network without administrator rights, so with
+  sandbox network blocked, crack doesn't sandbox commands on Windows and asks before
+  them instead.
+- Git Bash keeps some state in memory shared by every Git Bash you run. When you have
+  one open, crack lowers that state's label so the sandboxed one can start, which
+  means sandboxed commands share it with your Git Bash windows (it includes Git
+  Bash's list of mounted folders). It also means `/tmp` may be your Git Bash's, which
+  sandboxed commands can't write; `TMPDIR`, `TEMP` and `TMP` point to the sandbox's
+  own temporary folder, and `mktemp` uses it.
+
+crack checks once at startup that the sandbox works; if it doesn't, it asks before
+commands outside the safe list.
 
 Because the sandbox confines them, unknown commands don't need to ask. `ctrl-p` has:
 - **Sandbox: on / off**

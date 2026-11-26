@@ -2555,16 +2555,24 @@ impl CrackView {
         let text = if network {
             let on = !sandbox.network;
             crate::state::State::update(|s| s.sandbox_network = Some(on));
-            format!(
-                "Sandbox network: {}",
-                if on { "allowed" } else { "blocked" }
-            )
+            if cfg!(windows) && !on {
+                "Sandbox network: blocked. Windows can't block it in the sandbox, so commands \
+                 will ask first"
+                    .to_owned()
+            } else {
+                format!(
+                    "Sandbox network: {}",
+                    if on { "allowed" } else { "blocked" }
+                )
+            }
         } else {
             let on = !sandbox.wanted;
             crate::state::State::update(|s| s.sandbox = Some(on));
             if on && !sandbox.available {
-                "Sandbox on, but bubblewrap (bwrap) isn't installed: commands will ask instead"
-                    .to_owned()
+                format!(
+                    "Sandbox on, but {}: commands will ask instead",
+                    sandbox.missing()
+                )
             } else {
                 format!("Sandbox: {}", if on { "on" } else { "off" })
             }

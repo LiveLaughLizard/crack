@@ -120,7 +120,7 @@ pub fn run(workspace: &mut Workspace, selection: &Selection) -> i32 {
         );
     } else if !sandbox.available {
         let missing = if cfg!(windows) {
-            "commands couldn't run in an AppContainer here"
+            sandbox.missing()
         } else {
             "neither Landlock (Linux 5.13+) nor bubblewrap is available"
         };
