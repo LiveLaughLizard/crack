@@ -762,6 +762,10 @@ the model follows, written by third parties: read them before relying on them.
 
 crack installs Claude Code plugins: skills, slash commands, subagents, hooks and MCP
 servers, from any marketplace (a repository with `.claude-plugin/marketplace.json`).
+Plugins can come from the marketplace itself, a GitHub repo, any git URL (or a folder
+inside one), an HTTPS `.zip`, an npm package (install scripts never run), or a command
+that builds the plugin and prints its folder (crack shows the command and asks first;
+in the window, use `crack plugin install` for those).
 
 ```
 crack plugin marketplace add obra/superpowers     # owner/repo, a git URL or a folder
