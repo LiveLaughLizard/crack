@@ -482,6 +482,9 @@ the same time: up to `max_parallel_agents` (default 15) work at once, and the re
 - Agents started by the same parent can message each other with `message_agent`. crack
   stamps who sent it, so one agent can't pass itself off as another; messages are capped
   at 40,000 characters.
+- Teams survive restarts: each one is saved as it changes, and comes back when its
+  session is reopened, with reports and notes intact. Agents that were still working
+  show as interrupted; sending one a message resumes it from its saved transcript.
 - Agents can start their own agents, down to `max_agent_depth` levels (default 2; 1
   means only the main agent starts them). Each agent sees and steers only the agents it
   started, and each level has its own `max_parallel_agents` slots.

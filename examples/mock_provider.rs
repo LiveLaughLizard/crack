@@ -184,7 +184,12 @@ fn plan(last_user_text: Option<&str>, tool_result: Option<&str>) -> Plan {
 /// request, in order, then an answer quoting the last result.
 fn scripted_step(first_user: Option<&str>, done: usize, last: Option<&str>) -> Option<Plan> {
     let text = first_user?;
-    let start = text.find("steps:")? + 6;
+    let start = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("steps:"))
+        .and_then(|l| text.find(l.trim_start()))
+        .or_else(|| text.find("steps:"))?
+        + 6;
     let json = text[start..].lines().next()?.trim();
     // A step is ["tool", {args}], or a list of those to call together.
     let steps: Vec<Value> = serde_json::from_str(json).ok()?;
@@ -231,11 +236,27 @@ fn words(text: &str) -> Vec<String> {
 fn openai(request: &Value) -> Vec<String> {
     let messages = request["messages"].as_array().cloned().unwrap_or_default();
     let last = messages.last().cloned().unwrap_or(Value::Null);
-    let done = messages.iter().filter(|m| m["role"] == "tool").count();
-    let first_user = messages
+    // The script is the latest user message with a line starting "steps:" (so a continued
+    // session or a resumed agent can be given new steps); steps done are the tool
+    // results since it.
+    let scripted = messages.iter().rposition(|m| {
+        m["role"] == "user"
+            && m["content"]
+                .as_str()
+                .is_some_and(|t| t.lines().any(|l| l.trim_start().starts_with("steps:")))
+    });
+    let anchor = scripted.unwrap_or(0);
+    let done = messages[anchor..]
         .iter()
-        .find(|m| m["role"] == "user")
-        .and_then(|m| m["content"].as_str());
+        .filter(|m| m["role"] == "tool")
+        .count();
+    let first_user = match scripted {
+        Some(i) => messages[i]["content"].as_str(),
+        None => messages
+            .iter()
+            .find(|m| m["role"] == "user")
+            .and_then(|m| m["content"].as_str()),
+    };
     let plan = if let Some(step) = scripted_step(first_user, done, last["content"].as_str()) {
         step
     } else if last["role"] == "tool" {

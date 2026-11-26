@@ -692,6 +692,15 @@ pub(crate) async fn turn_loop(
                                 &p.name,
                                 &p.input,
                                 &crate::delegate::team_key(config, ctx),
+                                config
+                                    .subagents
+                                    .as_deref()
+                                    .map(|env| crate::delegate::Turn {
+                                        config,
+                                        env,
+                                        ctx,
+                                        events,
+                                    }),
                             )
                             .await
                         }

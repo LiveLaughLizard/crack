@@ -346,9 +346,20 @@ pub struct Info {
     notes_told: usize,
     /// The main agent has been shown the final report.
     report_told: bool,
+    /// Cut off when crack closed; a message resumes it from its transcript.
+    pub resumable: bool,
 }
 
 impl Info {
+    /// Its state in words, saying when a restart cut it off (a message resumes it).
+    pub fn status(&self) -> String {
+        if self.resumable && self.state == State::Stopped {
+            "interrupted (a message resumes it)".into()
+        } else {
+            self.state.label()
+        }
+    }
+
     pub fn label(&self) -> String {
         match &self.name {
             Some(name) => format!("{} ({name})", self.id),
@@ -411,9 +422,158 @@ fn with_team<T>(session: &str, f: impl FnOnce(&mut Vec<Member>) -> T) -> T {
     if let Some(pos) = teams.iter().position(|(s, _)| s == session) {
         return f(&mut teams[pos].1);
     }
-    teams.push((session.to_owned(), Vec::new()));
+    // Not in memory: a team saved before crack last closed, or a new one.
+    teams.push((session.to_owned(), load_team(session)));
     let team = &mut teams.last_mut().unwrap().1;
     f(team)
+}
+
+// ------------------------------------------------------------- saved teams
+
+/// Where a new agent's conversation starts.
+pub enum Seed<'a> {
+    /// The caller's conversation so far (a fork continues it; others start fresh).
+    Conversation(&'a [Message]),
+    /// An agent cut off when crack closed, picking up its saved transcript.
+    Resume {
+        id: String,
+        transcript: Box<Session>,
+    },
+}
+
+/// What's kept of a team member across restarts.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Saved {
+    id: String,
+    name: Option<String>,
+    kind: String,
+    model: String,
+    description: String,
+    /// queued, working, done, failed, stopped.
+    state: String,
+    #[serde(default)]
+    failure: String,
+    steps: u32,
+    notes: Vec<(String, String)>,
+    report: String,
+    session_id: String,
+}
+
+fn kv_key(team: &str) -> String {
+    format!("team:{team}")
+}
+
+/// Saves a team, so it can be restored when its session is opened after a restart.
+fn persist(team: &str, members: &[Member]) {
+    let saved: Vec<Saved> = members
+        .iter()
+        .map(|m| {
+            let i = lock(&m.info);
+            Saved {
+                id: i.id.clone(),
+                name: i.name.clone(),
+                kind: i.kind.clone(),
+                model: i.model.clone(),
+                description: i.description.clone(),
+                state: match &i.state {
+                    State::Queued => "queued",
+                    State::Running => "working",
+                    State::Done => "done",
+                    State::Failed(_) => "failed",
+                    State::Stopped if i.resumable => "working",
+                    State::Stopped => "stopped",
+                }
+                .into(),
+                failure: match &i.state {
+                    State::Failed(why) => why.clone(),
+                    _ => String::new(),
+                },
+                steps: i.steps,
+                notes: i
+                    .notes
+                    .iter()
+                    .map(|n| (n.kind.clone(), n.text.clone()))
+                    .collect(),
+                report: i.report.clone(),
+                session_id: i.session_id.clone(),
+            }
+        })
+        .collect();
+    if let Ok(json) = serde_json::to_string(&saved) {
+        crate::store::get().set_kv(&kv_key(team), json);
+    }
+}
+
+/// Saves the team now (after a change).
+fn save_team(team: &str) {
+    let teams = TEAMS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, members)) = teams.iter().find(|(key, _)| key == team) {
+        persist(team, members);
+    }
+}
+
+/// A team saved before crack last closed. Agents that were still working come back
+/// stopped but resumable, with a note saying so.
+fn load_team(team: &str) -> Vec<Member> {
+    let Some(saved) = crate::store::get()
+        .kv(&kv_key(team))
+        .and_then(|json| serde_json::from_str::<Vec<Saved>>(&json).ok())
+    else {
+        return Vec::new();
+    };
+    saved
+        .into_iter()
+        .map(|s| {
+            let interrupted = matches!(s.state.as_str(), "queued" | "working");
+            let mut notes: Vec<Note> = s
+                .notes
+                .into_iter()
+                .map(|(kind, text)| Note { kind, text })
+                .collect();
+            let notes_told = notes.len();
+            if interrupted {
+                notes.push(Note {
+                    kind: "progress".into(),
+                    text: "Interrupted when crack closed. Send it a message (send_message) to resume it \
+                           from where it stopped."
+                        .into(),
+                });
+            }
+            let info = Info {
+                id: s.id,
+                name: s.name,
+                kind: s.kind,
+                model: s.model,
+                description: s.description,
+                state: match s.state.as_str() {
+                    "done" => State::Done,
+                    "failed" => State::Failed(s.failure),
+                    _ => State::Stopped,
+                },
+                steps: s.steps,
+                activity: if interrupted {
+                    "interrupted when crack closed".into()
+                } else {
+                    "finished".into()
+                },
+                notes,
+                report: s.report,
+                session_id: s.session_id,
+                started: Instant::now(),
+                notes_told,
+                report_told: true,
+                resumable: interrupted,
+            };
+            let (_, changed) = watch::channel(0u64);
+            Member {
+                info: Arc::new(Mutex::new(info)),
+                inbox: Arc::default(),
+                changed,
+                // Nothing runs until it's resumed.
+                task: crate::runtime::spawn(async {}).abort_handle(),
+            }
+        })
+        .collect()
 }
 
 fn lock(info: &Arc<Mutex<Info>>) -> std::sync::MutexGuard<'_, Info> {
@@ -445,13 +605,22 @@ pub fn list(team: &str) -> Vec<Info> {
 /// Every agent in a session, nested ones included (for the sidebar).
 pub fn list_all(session: &str) -> Vec<Info> {
     let prefix = format!("{session}#");
-    let teams = TEAMS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut teams = TEAMS.lock().unwrap_or_else(|e| e.into_inner());
+    // Teams saved before crack last closed come back the first time they're asked for.
+    for (key, _) in crate::store::get().kv_prefix(&kv_key(&prefix)) {
+        let team = key.trim_start_matches("team:").to_owned();
+        if !teams.iter().any(|(k, _)| *k == team) {
+            let members = load_team(&team);
+            teams.push((team, members));
+        }
+    }
     let mut all: Vec<Info> = teams
         .iter()
         .filter(|(key, _)| key.starts_with(&prefix))
         .flat_map(|(_, members)| members.iter().map(|m| lock(&m.info).clone()))
         .collect();
-    all.sort_by_key(|i| i.started);
+    // By number: ids count up across the session, restored agents included.
+    all.sort_by_key(|i| i.id.trim_start_matches('a').parse::<u32>().unwrap_or(0));
     all
 }
 
@@ -491,7 +660,7 @@ pub fn news(session: &str) -> Option<String> {
                 if !finished && notes.is_empty() {
                     return None;
                 }
-                let mut text = format!("- {} ({})", i.label(), i.state.label());
+                let mut text = format!("- {} ({})", i.label(), i.status());
                 for note in notes {
                     text.push_str(&format!("\n  [{}] {}", note.kind, note.text));
                 }
@@ -566,7 +735,7 @@ pub fn reminder(session: &str) -> Option<String> {
                     text.push_str(&format!(
                         "- {} is {} ({}): {}",
                         i.label(),
-                        i.state.label(),
+                        i.status(),
                         i.kind,
                         i.activity
                     ));
@@ -578,11 +747,7 @@ pub fn reminder(session: &str) -> Option<String> {
                     } else {
                         ""
                     };
-                    text.push_str(&format!(
-                        "- {} {}:\n{preview}{more}",
-                        i.label(),
-                        i.state.label()
-                    ));
+                    text.push_str(&format!("- {} {}:\n{preview}{more}", i.label(), i.status()));
                 } else if notes.is_empty() {
                     return None;
                 } else {
@@ -615,6 +780,7 @@ pub struct Link {
 impl Link {
     fn bump(&self) {
         self.changed.send_modify(|n| *n += 1);
+        save_team(&self.team);
     }
 
     /// Messages from the main agent since the last step, as text for the subagent.
@@ -685,7 +851,7 @@ fn start(
     call_id: &str,
     input: &Value,
     events: &Events,
-    parent_history: &[Message],
+    seed: Seed<'_>,
 ) -> Result<(Arc<Mutex<Info>>, watch::Receiver<u64>), String> {
     let description = input["description"].as_str().unwrap_or("task").to_owned();
     let prompt = input["prompt"].as_str().unwrap_or_default().to_owned();
@@ -788,11 +954,12 @@ fn start(
              branch of its work (the last message). Do that branch yourself, directly; don't hand it on.\n",
         );
     }
-    // A fork starts from the conversation so far (minus the call that started it).
-    let initial: Vec<Message> = if fork {
-        parent_history.to_vec()
-    } else {
-        Vec::new()
+    // A fork starts from the conversation so far (minus the call that started it); a
+    // resumed agent from its own transcript.
+    let (initial, resumed): (Vec<Message>, Option<(String, Session)>) = match seed {
+        Seed::Conversation(history) if fork => (history.to_vec(), None),
+        Seed::Conversation(_) => (Vec::new(), None),
+        Seed::Resume { id, transcript } => (transcript.messages.clone(), Some((id, *transcript))),
     };
     system.push_str(
         "\n# Your role\nYou are a subagent: another agent started you for this task and may run others alongside you. \
@@ -811,10 +978,17 @@ fn start(
     }
 
     // Ids are unique across the session, nested agents included.
-    let id = format!("a{}", list_all(&ctx.session_id).len() + 1);
-    let mut session = Session::new(&cwd);
-    session.id = format!("sub-{}", session.id);
-    session.title = format!("\u{21b3} {description}");
+    let resuming = resumed.is_some();
+    let (id, mut session) = match resumed {
+        Some(resumed) => resumed,
+        None => {
+            let id = format!("a{}", list_all(&ctx.session_id).len() + 1);
+            let mut session = Session::new(&cwd);
+            session.id = format!("sub-{}", session.id);
+            session.title = format!("\u{21b3} {description}");
+            (id, session)
+        }
+    };
     let info = Arc::new(Mutex::new(Info {
         id: id.clone(),
         name: name.clone(),
@@ -830,6 +1004,7 @@ fn start(
         started: Instant::now(),
         notes_told: 0,
         report_told: false,
+        resumable: false,
     }));
     let inbox: Inbox = Arc::default();
     let (changed_tx, changed_rx) = watch::channel(0u64);
@@ -964,6 +1139,7 @@ fn start(
                             i.activity = text.clone();
                             i.steps
                         };
+                        save_team(&link.team);
                         status(format!("{steps} \u{b7} {text}"));
                     }
                     AgentEvent::Approval { reason, .. } => {
@@ -979,6 +1155,10 @@ fn start(
                     _ => {}
                 }
                 session.apply(&event, Agent::Build, &model_ref);
+                // Saved as it goes, so it can be resumed if crack closes mid-task.
+                if matches!(event, AgentEvent::Message(_)) {
+                    let _ = session.save();
+                }
             }
         };
         let (result, ()) = tokio::join!(work, watch_events);
@@ -1045,6 +1225,10 @@ fn start(
     });
     let abort = handle.abort_handle();
     with_team(&session_key, |team| {
+        // A resumed agent takes its old place.
+        if resuming {
+            team.retain(|m| lock(&m.info).id != *lock(&info).id);
+        }
         team.push(Member {
             info: info.clone(),
             inbox,
@@ -1052,6 +1236,7 @@ fn start(
             task: abort,
         })
     });
+    save_team(&session_key);
     // Keep the patch for the waiting `task` call (it shows it as a diff).
     let patches = PATCHES.get_or_init(Default::default);
     let key = format!("{session_key}/{id}");
@@ -1095,7 +1280,7 @@ impl Drop for StopOnDrop {
 }
 
 fn stop(session: &str, key: &str) -> Option<String> {
-    with_team(session, |team| {
+    let label = with_team(session, |team| {
         let member = team
             .iter()
             .rev()
@@ -1108,7 +1293,9 @@ fn stop(session: &str, key: &str) -> Option<String> {
             i.report_told = true;
         }
         Some(i.label())
-    })
+    });
+    save_team(session);
+    label
 }
 
 /// Runs a `task` call: starts the agent, and unless it's in the background, waits for
@@ -1128,8 +1315,15 @@ pub async fn run(
         .filter(|s| !s.is_empty())
         .unwrap_or("general");
     let title = format!("Task: {description} ({kind})");
-    let (info, mut changed) = match start(config, env, ctx, call_id, input, events, parent_history)
-    {
+    let (info, mut changed) = match start(
+        config,
+        env,
+        ctx,
+        call_id,
+        input,
+        events,
+        Seed::Conversation(parent_history),
+    ) {
         Ok(started) => started,
         Err(error) => return ToolOutput::error(error, title),
     };
@@ -1209,7 +1403,61 @@ pub async fn run(
 }
 
 /// The main agent's team tools: send_message, agent_status, wait_for_agents, stop_agent.
-pub async fn team_tool(name: &str, input: &Value, team: &str) -> ToolOutput {
+/// What resuming an agent needs from the turn that messages it.
+pub struct Turn<'a> {
+    pub config: &'a TurnConfig,
+    pub env: &'a SubagentEnv,
+    pub ctx: &'a ToolContext,
+    pub events: &'a Events,
+}
+
+/// Restarts an agent cut off when crack closed, from its saved transcript, with `message`.
+fn resume(turn: &Turn, info: &Arc<Mutex<Info>>, message: &str) -> Result<String, String> {
+    let (id, label, name, kind, description, session_id) = {
+        let i = lock(info);
+        (
+            i.id.clone(),
+            i.label(),
+            i.name.clone(),
+            i.kind.clone(),
+            i.description.clone(),
+            i.session_id.clone(),
+        )
+    };
+    let transcript = Session::load(&session_id).map_err(|e| {
+        format!("{label}'s transcript couldn't be loaded ({e:#}); start a new task instead.")
+    })?;
+    let input = json!({
+        "description": description,
+        "subagent_type": kind,
+        "name": name,
+        "prompt": format!(
+            "crack was restarted and cut you off mid-task. Pick up where you left off (check what's \
+             already done before redoing it). The agent that started you says:\n\n{}",
+            bounded(message)
+        ),
+    });
+    start(
+        turn.config,
+        turn.env,
+        turn.ctx,
+        &format!("resume-{id}"),
+        &input,
+        turn.events,
+        Seed::Resume {
+            id,
+            transcript: Box::new(transcript),
+        },
+    )?;
+    Ok(label)
+}
+
+pub async fn team_tool(
+    name: &str,
+    input: &Value,
+    team: &str,
+    turn: Option<Turn<'_>>,
+) -> ToolOutput {
     let session = team;
     let ok = |content: String, title: String| {
         ToolOutput::ok(
@@ -1234,10 +1482,25 @@ pub async fn team_tool(name: &str, input: &Value, team: &str) -> ToolOutput {
                     title,
                 );
             };
-            let (state, label) = {
+            let (state, label, resumable) = {
                 let i = lock(&info);
-                (i.state.clone(), i.label())
+                (i.state.clone(), i.label(), i.resumable)
             };
+            if resumable && !state.busy() {
+                return match turn.as_ref().map(|t| resume(t, &info, message)) {
+                    Some(Ok(label)) => ok(
+                        format!(
+                            "Resumed {label} from its saved transcript with your message; it works in the background. \
+                             Its report comes through agent_status / wait_for_agents."
+                        ),
+                        title,
+                    ),
+                    Some(Err(error)) => ToolOutput::error(error, title),
+                    None => {
+                        ToolOutput::error(format!("{label} can't be resumed from here."), title)
+                    }
+                };
+            }
             if !state.busy() {
                 return ToolOutput::error(
                     format!(
@@ -1281,7 +1544,7 @@ pub async fn team_tool(name: &str, input: &Value, team: &str) -> ToolOutput {
                     i.label(),
                     i.kind,
                     i.model,
-                    i.state.label(),
+                    i.status(),
                     i.steps,
                     i.started.elapsed().as_secs(),
                     i.description,
@@ -1304,7 +1567,7 @@ pub async fn team_tool(name: &str, input: &Value, team: &str) -> ToolOutput {
                             "- {} \u{b7} {} \u{b7} {} \u{b7} {} steps \u{b7} {}",
                             i.label(),
                             i.kind,
-                            i.state.label(),
+                            i.status(),
                             i.steps,
                             if i.state.busy() {
                                 i.activity.clone()
@@ -1405,7 +1668,7 @@ pub async fn team_tool(name: &str, input: &Value, team: &str) -> ToolOutput {
             for (info, _) in &members {
                 let mut i = lock(info);
                 let notes = i.take_new_notes();
-                text.push_str(&format!("## {} \u{b7} {}\n", i.label(), i.state.label()));
+                text.push_str(&format!("## {} \u{b7} {}\n", i.label(), i.status()));
                 for note in notes {
                     text.push_str(&format!("[{}] {}\n", note.kind, note.text));
                 }

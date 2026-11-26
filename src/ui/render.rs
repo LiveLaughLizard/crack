@@ -1324,7 +1324,7 @@ impl CrackView {
                                 .child(div().text_color(theme::text_soft()).child(agent.label()))
                                 .child(div().text_color(color).child(format!(
                                     "{} \u{b7} {} steps{notes}",
-                                    agent.state.label(),
+                                    agent.status(),
                                     agent.steps
                                 ))),
                         )
