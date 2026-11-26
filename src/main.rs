@@ -579,6 +579,7 @@ fn main() {
     let result = dispatch(mode, &cli);
     // Background shell commands end with crack (headless runs and the window alike).
     background::kill_all();
+    delegate::stop_all();
     // Exiting skips destructors: flush the log first.
     drop(guard);
     match result {

@@ -175,6 +175,8 @@ pub struct CrackView {
     pub(super) scroll: ListState,
     /// The session the transcript list was built for, and how many entries it had.
     pub(super) transcript_for: (String, usize),
+    /// A repaint is scheduled while subagents work in the background.
+    pub(super) team_tick: bool,
     pub(super) follow: bool,
     pub(super) running: Option<Running>,
     pub(super) esc_armed: Option<Instant>,
@@ -287,6 +289,7 @@ impl CrackView {
             session,
             input,
             transcript_for: (String::new(), 0),
+            team_tick: false,
             scroll: new_transcript(),
             follow: true,
             running: None,
@@ -2004,6 +2007,7 @@ impl CrackView {
         if id != self.tab_id {
             if let Some(tab) = self.background.remove(&id) {
                 crate::background::kill_session(&tab.session.id);
+                crate::delegate::stop_session(&tab.session.id);
                 if let Some(running) = &tab.running {
                     let _ = running.cancel.send(true);
                 }
@@ -2013,6 +2017,7 @@ impl CrackView {
             return;
         }
         crate::background::kill_session(&self.session.id);
+        crate::delegate::stop_session(&self.session.id);
         if let Some(running) = &self.running {
             let _ = running.cancel.send(true);
         }

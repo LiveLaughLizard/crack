@@ -122,7 +122,7 @@ impl Workspace {
                 model_ref.to_owned(),
                 self.config.subagent_model.clone(),
                 self.instructions.clone(),
-                self.config.max_parallel_agents.unwrap_or(4),
+                self.config.max_parallel_agents.unwrap_or(15),
                 self.config.subagent_max_steps.unwrap_or(60),
             ))),
             model,
@@ -146,6 +146,7 @@ impl Workspace {
             server_compaction: self.config.server_compaction.unwrap_or(false),
             clear_tool_results: self.config.clear_tool_results.unwrap_or(false),
             context_tokens: 0,
+            team_link: None,
         })
     }
 

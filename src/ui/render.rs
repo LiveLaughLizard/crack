@@ -968,6 +968,25 @@ impl CrackView {
     }
 
     fn render_session(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // Background subagents change without events reaching the window: look again
+        // every second while any of them work.
+        if !self.team_tick
+            && crate::delegate::list(&self.session.id)
+                .iter()
+                .any(|i| i.state.busy())
+        {
+            self.team_tick = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let _ = this.update(cx, |view, cx| {
+                    view.team_tick = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         // Keep the list in step with the session: a different session (or a shorter one,
         // after a rewind) starts over; new entries are added at the end.
         let count = self.session.entries.len();
@@ -1229,6 +1248,61 @@ impl CrackView {
                     .child(line),
             );
         }
+        // Subagents this session started: state, activity, notes; click for the transcript.
+        let team = crate::delegate::list(&self.session.id);
+        if !team.is_empty() {
+            let busy = team.iter().filter(|i| i.state.busy()).count();
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .text_color(theme::muted())
+                .child(section(&format!("Agents ({busy} working)")));
+            for (i, agent) in team.iter().rev().take(15).enumerate() {
+                let color = match agent.state {
+                    crate::delegate::State::Running => theme::success(),
+                    crate::delegate::State::Queued => theme::warning(),
+                    crate::delegate::State::Failed(_) => theme::error(),
+                    _ => theme::text_soft(),
+                };
+                let what = if agent.state.busy() {
+                    agent.activity.clone()
+                } else {
+                    agent.description.clone()
+                };
+                let notes = if agent.notes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" \u{b7} {} note(s)", agent.notes.len())
+                };
+                let link = agent.session_id.clone();
+                list = list.child(
+                    div()
+                        .id(("agent", i))
+                        .flex()
+                        .flex_col()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(theme::raised_high()))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_transcript(link.clone(), window, cx)
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(6.))
+                                .child(div().text_color(theme::text_soft()).child(agent.label()))
+                                .child(div().text_color(color).child(format!(
+                                    "{} \u{b7} {} steps{notes}",
+                                    agent.state.label(),
+                                    agent.steps
+                                ))),
+                        )
+                        .child(div().truncate().child(what)),
+                );
+            }
+            column = column.child(list);
+        }
+
         // Background shell commands this session started, with a stop button.
         let shells = crate::background::list(&self.session.id);
         if !shells.is_empty() {

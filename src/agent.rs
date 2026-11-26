@@ -102,6 +102,8 @@ pub struct TurnConfig {
     pub approvals: Option<mpsc::UnboundedSender<ApprovalRequest>>,
     /// Lets the model start subagents (`task`); `None` inside a subagent.
     pub subagents: Option<std::sync::Arc<crate::delegate::SubagentEnv>>,
+    /// Inside a subagent: its inbox and where `message_main` notes go.
+    pub team_link: Option<std::sync::Arc<crate::delegate::Link>>,
     /// The model's context window, when known; compaction needs it.
     pub context_window: Option<u64>,
     /// Compact when the context passes this share of the window.
@@ -215,7 +217,11 @@ pub(crate) async fn turn_loop(
             .as_ref()
             .is_none_or(|a| a.iter().any(|t| t == "task"))
     {
-        specs.push(env.spec(config.agent));
+        specs.extend(env.specs(config.agent));
+    }
+    // A subagent can talk back to the agent that started it.
+    if config.team_link.is_some() {
+        specs.push(crate::delegate::message_main_spec());
     }
     let mut steps = 0;
     let mut context = config.context_tokens;
@@ -275,6 +281,10 @@ pub(crate) async fn turn_loop(
     }
     // Background shells: what's running and what finished since the last turn.
     added.extend(crate::background::reminder(&ctx.session_id));
+    // Subagents: who's working, their notes, and reports not yet seen.
+    if config.subagents.is_some() {
+        added.extend(crate::delegate::reminder(&ctx.session_id));
+    }
     if !added.is_empty() {
         let text = added.join("\n\n");
         if let Some(last) = history.last_mut() {
@@ -284,6 +294,20 @@ pub(crate) async fn turn_loop(
     }
 
     loop {
+        // A subagent: the main agent's messages arrive before its next request.
+        if let Some(link) = &config.team_link
+            && let Some(text) = link.take_messages()
+        {
+            match history.last_mut() {
+                Some(last) if last.role == Role::User => {
+                    last.parts.push(Part::Text { text: text.clone() })
+                }
+                _ => history.push(Message::user_text(text.clone())),
+            }
+            let _ = events.send(AgentEvent::Notice(format!(
+                "Message from the main agent: {text}"
+            )));
+        }
         // Trim old tool output first: it keeps the conversation itself, and one trim
         // costs one prompt-cache rewrite, so it runs in batches well before compacting.
         // Skipped when Claude clears old tool results itself.
@@ -427,6 +451,10 @@ pub(crate) async fn turn_loop(
             })
             .collect();
         if calls.is_empty() {
+            // A subagent with a message still to read isn't done yet.
+            if config.team_link.as_ref().is_some_and(|l| l.has_messages()) {
+                continue;
+            }
             // A Stop hook can send the model back to work (a few times at most).
             let outcome = config
                 .hooks
@@ -531,12 +559,13 @@ pub(crate) async fn turn_loop(
             prepared
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| p.outcome.is_none() && p.name == "task")
+                .filter(|(_, p)| p.outcome.is_none() && is_team_tool(&p.name))
                 .map(|(i, p)| async move {
                     let output = match &config.subagents {
-                        Some(env) => {
+                        Some(env) if p.name == "task" => {
                             crate::delegate::run(config, env, ctx, &p.id, &p.input, events).await
                         }
+                        Some(_) => crate::delegate::team_tool(&p.name, &p.input, ctx).await,
                         None => tools::ToolOutput::error(
                             "Subagents can't start subagents of their own.",
                             tools::title(&p.name, &p.input),
@@ -550,9 +579,13 @@ pub(crate) async fn turn_loop(
             for (i, p) in prepared
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| p.outcome.is_none() && p.name != "task")
+                .filter(|(_, p)| p.outcome.is_none() && !is_team_tool(&p.name))
             {
-                done.push((i, tools::run(&p.name, &p.input, ctx, config.agent).await));
+                let output = match (&config.team_link, p.name.as_str()) {
+                    (Some(link), "message_main") => crate::delegate::message_main(link, &p.input),
+                    _ => tools::run(&p.name, &p.input, ctx, config.agent).await,
+                };
+                done.push((i, output));
             }
             done
         };
@@ -878,6 +911,11 @@ async fn server_compact(
         .into_iter()
         .find(|p| matches!(p, Part::Compaction { .. }));
     Ok((block, completion.usage))
+}
+
+/// `task` and the team tools run concurrently (they may wait on subagents).
+fn is_team_tool(name: &str) -> bool {
+    name == "task" || crate::delegate::TEAM_TOOLS.contains(&name)
 }
 
 /// Shows hook output in the transcript.

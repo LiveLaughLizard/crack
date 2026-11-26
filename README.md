@@ -439,7 +439,25 @@ are never attached. MCP resources work the same way, as `@server:uri`.
 The model can hand a self-contained job to a subagent with the `task` tool. A subagent
 starts with a fresh context, its own instructions, tools and model, and returns one
 report, so the main conversation stays small. Several `task` calls in one reply run at
-the same time (`max_parallel_agents`, default 4).
+the same time: up to `max_parallel_agents` (default 15) work at once, and the rest queue.
+
+**Orchestration.** The main agent runs its subagents as a team:
+
+- `task` waits for the report by default; with `run_in_background` the agent starts and
+  the main agent carries on. Agents get short ids (`a1`, `a2`...) and optional names.
+- `send_message` reaches a working agent at its next step: new information, a change
+  of plan, an answer.
+- Agents report back while they work with `message_main`: progress at milestones,
+  findings to act on now, questions, blockers.
+- `agent_status` shows each one's activity, steps, notes and report;
+  `wait_for_agents` waits for reports (or, with `until: any_note`, the first note);
+  `stop_agent` ends one.
+- Before each turn the main agent is told what's working, new notes, and reports it
+  hasn't read.
+
+An agent exits once it has no more work and has reported. A message that arrives as
+it finishes is handled first. The sidebar's Agents section lists the team with each
+agent's state and latest activity; click one for its transcript.
 
 **Built-in agents:**
 - **`explore`:** read-only codebase search. It uses a smaller, faster model from the
@@ -473,7 +491,8 @@ apply, so parallel agents can't overwrite each other or your work.
 - They can't start subagents of their own.
 - Each one stops after `subagent_max_steps` model requests (default 60).
 - Their tokens count toward the session's cost.
-- Interrupting the turn stops them and cleans up their worktrees.
+- Interrupting the turn stops the agents it was waiting for; background agents keep
+  going until they report, are stopped, or the tab closes.
 
 ## Hooks
 

@@ -49,7 +49,7 @@ pub struct Config {
     /// On Claude (Anthropic's own API), let the server clear old tool results as the
     /// context fills (context editing, beta). Off by default.
     pub clear_tool_results: Option<bool>,
-    /// How many subagents may run at once (default 4).
+    /// How many subagents may work at once (default 15); more queue.
     pub max_parallel_agents: Option<usize>,
     /// The model for `explore` and other "small" subagents (default: a smaller model
     /// from the same provider).
