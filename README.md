@@ -764,14 +764,21 @@ crack plugin list
 crack plugin install superpowers                 # name, or name@marketplace
 crack plugin update|disable|enable|remove superpowers
 crack plugin trust superpowers                   # allow its hooks after reviewing them
+crack plugin config ponytail ledger=false        # a plugin's settings (userConfig)
 ```
 
 In the window, `/extensions` lists every marketplace's plugins, and `/plugin ...` takes
 the same commands. A plugin's hooks and MCP servers run code on your machine, so crack
 shows exactly what they run and asks first. Until you allow them, and again after an
 update changes them, they stay off while the plugin's skills, commands and agents work.
-Hooks get `CLAUDE_PLUGIN_ROOT` and `CLAUDE_PLUGIN_DATA` as in Claude Code. Plugins
-live in `~/.config/crack/plugins`.
+Hooks get `CLAUDE_PLUGIN_ROOT`, `CLAUDE_PLUGIN_DATA` and `CLAUDE_PLUGIN_OPTION_<KEY>` (the
+plugin's settings) as in Claude Code. Plugins live in `~/.config/crack/plugins`. Settings
+are stored in its `state.json`, readable only by you; sensitive ones (tokens) are
+stored there too, not in a keychain.
+
+A project can turn installed plugins on or off for itself with `enabledPlugins` in
+`.claude/settings.json` (or `.crack/settings.json`): `{"enabledPlugins":
+{"superpowers@superpowers-dev": false}}`.
 
 ## Custom commands
 

@@ -1007,6 +1007,7 @@ fn plugin_command(args: &[String]) -> i32 {
         ["remove" | "uninstall", spec] => plugins::uninstall(spec),
         ["enable", spec] => plugins::set_enabled(spec, true),
         ["disable", spec] => plugins::set_enabled(spec, false),
+        ["config", spec, sets @ ..] => plugins::configure(spec, sets),
         ["trust", spec] => plugins::trust(spec).map(|review| {
             if review.runs_code() {
                 format!("Approved these for {spec}:\n{}", review.describe())
@@ -1015,7 +1016,7 @@ fn plugin_command(args: &[String]) -> i32 {
             }
         }),
         _ => Err(anyhow::anyhow!(
-            "usage: crack plugin [list | marketplace add|update|remove <source> | install|update|remove|enable|disable|trust <name>[@marketplace]] [--yes]"
+            "usage: crack plugin [list | marketplace add|update|remove <source> | install|update|remove|enable|disable|trust <name>[@marketplace] | config <name> [key=value ...]] [--yes]"
         )),
     };
     match result {

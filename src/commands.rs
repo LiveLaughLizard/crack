@@ -85,7 +85,7 @@ pub fn discover(cwd: &Path) -> Vec<Command> {
         collect(&home.join(".claude/commands"), "", &[], &mut out);
     }
     let mut plugin_commands = Vec::new();
-    for plugin in crate::plugins::enabled() {
+    for plugin in crate::plugins::enabled(Some(cwd)) {
         for path in &plugin.components.command_paths {
             let prefix = format!("{}:", plugin.name);
             if path.is_dir() {

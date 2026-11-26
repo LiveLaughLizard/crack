@@ -189,7 +189,7 @@ impl Config {
             }
         }
         // Enabled plugins add skills, and (once approved) hooks and MCP servers.
-        crate::plugins::apply(&mut config);
+        crate::plugins::apply(&mut config, cwd);
         Ok(config)
     }
 

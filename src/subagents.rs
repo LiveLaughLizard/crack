@@ -129,7 +129,7 @@ pub fn discover(cwd: &Path) -> Vec<AgentDef> {
         dirs.push(config.join("agents"));
     }
     // Enabled plugins' agents, after the user's own.
-    for plugin in crate::plugins::enabled() {
+    for plugin in crate::plugins::enabled(Some(cwd)) {
         dirs.extend(
             plugin
                 .components

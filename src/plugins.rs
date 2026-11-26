@@ -53,6 +53,9 @@ pub struct Installed {
     /// Fingerprint of the hook and MCP commands the user approved.
     #[serde(default)]
     pub trusted: Option<String>,
+    /// Values for the plugin's `userConfig` options.
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
 }
 
 fn yes() -> bool {
@@ -79,6 +82,12 @@ impl State {
         std::fs::create_dir_all(&root)?;
         let tmp = root.join("state.json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
+        // It can hold plugin settings marked sensitive (tokens): only the user reads it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
         std::fs::rename(tmp, root.join("state.json"))?;
         Ok(())
     }
@@ -481,6 +490,8 @@ pub fn commit_install(pending: Pending, approved: bool) -> anyhow::Result<String
             .and_then(|p| p.trusted.clone())
             .filter(|t| *t == pending.review.fingerprint)
     };
+    // Settings carry over to the new version.
+    let options = previous.map(|p| p.options.clone()).unwrap_or_default();
     state.plugins.insert(
         pending.key.clone(),
         Installed {
@@ -489,6 +500,7 @@ pub fn commit_install(pending: Pending, approved: bool) -> anyhow::Result<String
             commit: pending.commit.clone(),
             enabled,
             trusted,
+            options,
         },
     );
     state.save()?;
@@ -729,31 +741,130 @@ pub struct Loaded {
     pub env: Vec<(String, String)>,
 }
 
-pub fn enabled() -> Vec<Loaded> {
+/// A project's `enabledPlugins` (`.claude/settings.json`, `.crack/settings.json`):
+/// `{"name@marketplace": true|false}` turns installed plugins on or off there.
+pub fn project_overrides(cwd: &Path) -> BTreeMap<String, bool> {
+    let root = crate::context::project_root(cwd);
+    let mut out = BTreeMap::new();
+    for file in [
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".crack/settings.json",
+    ] {
+        if let Some(Value::Object(map)) =
+            read_json(&root.join(file)).map(|v| v["enabledPlugins"].clone())
+        {
+            for (key, value) in map {
+                if let Some(on) = value.as_bool() {
+                    out.insert(key, on);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A plugin's `userConfig` options: (key, description, default, sensitive).
+pub fn options_of(dir: &Path) -> Vec<(String, String, Option<String>, bool)> {
+    let manifest = manifest(dir, &entry_of(dir));
+    let Some(map) = manifest["userConfig"].as_object() else {
+        return Vec::new();
+    };
+    map.iter()
+        .map(|(key, o)| {
+            let default = match &o["default"] {
+                Value::Null => None,
+                Value::String(s) => Some(s.clone()),
+                other => Some(other.to_string()),
+            };
+            let title = o["title"].as_str().unwrap_or(key);
+            let description = o["description"].as_str().unwrap_or("");
+            (
+                key.clone(),
+                format!("{title}: {description}"),
+                default,
+                o["sensitive"].as_bool() == Some(true),
+            )
+        })
+        .collect()
+}
+
+/// Enabled plugins, with a project's own `enabledPlugins` applied when `cwd` is given.
+pub fn enabled(cwd: Option<&Path>) -> Vec<Loaded> {
     let state = State::load();
+    let overrides = cwd.map(project_overrides).unwrap_or_default();
     state
         .plugins
         .iter()
-        .filter(|(_, p)| p.enabled && p.dir.is_dir())
+        .filter(|(key, p)| overrides.get(*key).copied().unwrap_or(p.enabled) && p.dir.is_dir())
         .map(|(key, p)| {
             let entry = entry_of(&p.dir);
             let components = Components::read(&p.dir, &entry);
             let fingerprint = review(&p.dir, &entry).fingerprint;
+            let mut env = plugin_env(key, &p.dir);
+            // userConfig values, as Claude Code exports them.
+            for (option, _, default, _) in options_of(&p.dir) {
+                if let Some(value) = p.options.get(&option).cloned().or(default) {
+                    env.push((
+                        format!("CLAUDE_PLUGIN_OPTION_{}", option.to_ascii_uppercase()),
+                        value,
+                    ));
+                }
+            }
             Loaded {
                 key: key.clone(),
                 name: key.split('@').next().unwrap_or(key).to_owned(),
                 trusted: p.trusted.as_deref() == Some(fingerprint.as_str()),
-                env: plugin_env(key, &p.dir),
+                env,
                 components,
             }
         })
         .collect()
 }
 
+/// `crack plugin config <name> [key=value ...]`: shows or sets a plugin's options.
+pub fn configure(spec: &str, sets: &[&str]) -> anyhow::Result<String> {
+    let mut state = State::load();
+    let key = installed_key(&state, spec)?;
+    let plugin = state.plugins.get_mut(&key).unwrap();
+    let options = options_of(&plugin.dir);
+    anyhow::ensure!(!options.is_empty(), "{key} has no settings");
+    for set in sets {
+        let (name, value) = set
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("use key=value (got {set})"))?;
+        anyhow::ensure!(
+            options.iter().any(|(k, ..)| k == name),
+            "{key} has no setting '{name}'"
+        );
+        plugin.options.insert(name.to_owned(), value.to_owned());
+    }
+    let mut out = format!("Settings for {key}:\n");
+    for (name, description, default, sensitive) in &options {
+        let value = plugin
+            .options
+            .get(name)
+            .cloned()
+            .or(default.clone())
+            .unwrap_or_default();
+        let shown = if *sensitive && !value.is_empty() {
+            "(set, hidden)".to_owned()
+        } else {
+            value
+        };
+        out.push_str(&format!("  {name} = {shown}\n      {description}\n"));
+    }
+    if !sets.is_empty() {
+        state.save()?;
+        out.push_str("Saved. They take effect in new turns (hooks and MCP servers get CLAUDE_PLUGIN_OPTION_<KEY>).\n");
+    }
+    Ok(out)
+}
+
 /// Adds enabled plugins' skills, hooks and MCP servers to the config. Commands and
 /// agents are read where they're used (`commands`, `subagents`).
-pub fn apply(config: &mut crate::config::Config) {
-    for plugin in enabled() {
+pub fn apply(config: &mut crate::config::Config, cwd: &Path) {
+    for plugin in enabled(Some(cwd)) {
         for dir in &plugin.components.skill_dirs {
             config.skills.push(dir.display().to_string());
         }
