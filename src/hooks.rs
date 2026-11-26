@@ -522,6 +522,8 @@ pub fn trust(config: &HooksConfig, cwd: &Path) {
 mod tests {
     use super::*;
 
+    // The tests that use these run bash scripts, so Unix only.
+    #[cfg(unix)]
     fn config(toml_text: &str) -> HooksConfig {
         #[derive(Deserialize)]
         struct Wrapper {
@@ -530,6 +532,7 @@ mod tests {
         toml::from_str::<Wrapper>(toml_text).unwrap().hooks
     }
 
+    #[cfg(unix)]
     fn hooks(toml_text: &str) -> Hooks {
         let config = config(toml_text);
         let mut hooks = Hooks::new(&config, &std::env::temp_dir(), "test");
@@ -631,6 +634,8 @@ mod tests {
         );
     }
 
+    // Bash quoting.
+    #[cfg(unix)]
     #[tokio::test]
     async fn json_answers_and_context() {
         let h = hooks(
