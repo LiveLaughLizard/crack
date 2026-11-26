@@ -598,6 +598,7 @@ fn start(
         trim_keep: config.trim_keep,
         server_compaction: config.server_compaction,
         clear_tool_results: config.clear_tool_results,
+        server_web_search: config.server_web_search,
         context_tokens: 0,
         subagents: None,
         team_link: Some(link.clone()),

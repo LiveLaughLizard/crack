@@ -257,7 +257,7 @@ impl AnthropicEndpoint {
                 "cache_control": {"type": "ephemeral"},
             }]);
         }
-        if !request.tools.is_empty() {
+        if !request.tools.is_empty() || (direct && request.web_search) {
             let mut tools: Vec<Value> = request
                 .tools
                 .iter()
@@ -275,6 +275,12 @@ impl AnthropicEndpoint {
                     value
                 })
                 .collect();
+            // Claude's own web search, run on Anthropic's servers.
+            if direct && request.web_search {
+                tools.push(
+                    json!({"type": "web_search_20260209", "name": "web_search", "max_uses": 8}),
+                );
+            }
             if let Some(last) = tools.last_mut() {
                 last["cache_control"] = json!({"type": "ephemeral"});
             }
@@ -539,6 +545,7 @@ fn part_json(part: &Part) -> Option<Value> {
             "content": content,
             "signature": signature,
         }),
+        Part::Server { block } => block.clone(),
     })
 }
 
@@ -552,6 +559,11 @@ enum Block {
     Compaction {
         content: String,
         signature: String,
+    },
+    /// A server tool's block, kept as sent (its input may stream in as JSON).
+    Server {
+        block: Value,
+        json: String,
     },
     Tool {
         id: String,
@@ -614,6 +626,11 @@ async fn read_stream(
                             json: String::new(),
                         }
                     }
+                    // Server tools (web search and the code that filters its results).
+                    kind if !kind.is_empty() => Block::Server {
+                        block: block.clone(),
+                        json: String::new(),
+                    },
                     _ => Block::Other,
                 };
                 while blocks.len() <= index {
@@ -642,6 +659,9 @@ async fn read_stream(
                         signature.push_str(delta["signature"].as_str().unwrap_or_default());
                     }
                     ("input_json_delta", Block::Tool { json, .. }) => {
+                        json.push_str(delta["partial_json"].as_str().unwrap_or_default());
+                    }
+                    ("input_json_delta", Block::Server { json, .. }) => {
                         json.push_str(delta["partial_json"].as_str().unwrap_or_default());
                     }
                     // In case the summary is ever streamed in pieces.
@@ -701,6 +721,14 @@ async fn read_stream(
             }),
             Block::Compaction { content, signature } => {
                 (!content.is_empty()).then_some(Part::Compaction { content, signature })
+            }
+            Block::Server { mut block, json } => {
+                if !json.trim().is_empty()
+                    && let Ok(input) = serde_json::from_str::<Value>(&json)
+                {
+                    block["input"] = input;
+                }
+                Some(Part::Server { block })
             }
             Block::Tool { id, name, json } => {
                 // With eager input streaming the input is not validated server-side;
@@ -787,6 +815,7 @@ mod tests {
             max_tokens: 1000,
             compaction: false,
             clear_tool_results_at: None,
+            web_search: false,
         }
     }
 
@@ -947,6 +976,7 @@ mod compaction_tests {
             max_tokens: 1000,
             compaction,
             clear_tool_results_at: clear,
+            web_search: false,
         }
     }
 
@@ -991,6 +1021,55 @@ mod compaction_tests {
             json!({"type": "compaction", "content": "Summary", "signature": "EuYB"})
         );
         assert_eq!(json[1]["role"], "user");
+    }
+
+    #[tokio::test]
+    async fn web_search_blocks_are_kept_and_replayed_unchanged() {
+        let events = [
+            json!({"type": "message_start", "message": {"usage": {"input_tokens": 10, "output_tokens": 0}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"query\": \"rust 1.100\"}"}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [{"type": "web_search_result", "url": "https://blog.rust-lang.org", "title": "Rust 1.100", "encrypted_content": "abc"}]}}),
+            json!({"type": "content_block_stop", "index": 1}),
+            json!({"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 2, "delta": {"type": "text_delta", "text": "It shipped."}}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}}),
+        ];
+        let body: String = events
+            .iter()
+            .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+            .collect();
+        let response = reqwest::Response::from(http::Response::new(body));
+        let mut sink = |_| {};
+        let completion = read_stream(response, &mut sink).await.unwrap();
+        let parts = &completion.message.parts;
+        assert!(
+            matches!(&parts[0], Part::Server { block } if block["input"]["query"] == "rust 1.100")
+        );
+        assert!(
+            matches!(&parts[1], Part::Server { block } if block["type"] == "web_search_tool_result")
+        );
+        assert!(matches!(&parts[2], Part::Text { text } if text == "It shipped."));
+        // Sent back as they came.
+        let json = messages_json(std::slice::from_ref(&completion.message));
+        assert_eq!(json[0]["content"][0]["type"], "server_tool_use");
+        assert_eq!(
+            json[0]["content"][1]["content"][0]["encrypted_content"],
+            "abc"
+        );
+        // The tool goes only to Anthropic's own API, and only when asked for.
+        let messages = vec![Message::user_text("hi")];
+        let mut with_search = request(&messages, false, None);
+        with_search.web_search = true;
+        let body = endpoint("https://api.anthropic.com").body(&with_search);
+        assert_eq!(body["tools"][0]["type"], "web_search_20260209");
+        assert!(
+            endpoint("http://localhost:1")
+                .body(&with_search)
+                .get("tools")
+                .is_none()
+        );
     }
 
     #[tokio::test]

@@ -116,6 +116,8 @@ pub struct TurnConfig {
     pub server_compaction: bool,
     /// Let Claude clear old tool results (context editing) when the endpoint offers it.
     pub clear_tool_results: bool,
+    /// Use Anthropic's own web search tool instead of `websearch` (`web_search = "anthropic"`).
+    pub server_web_search: bool,
     /// How full the context was at the end of the last turn.
     pub context_tokens: u64,
 }
@@ -218,6 +220,10 @@ pub(crate) async fn turn_loop(
             .is_none_or(|a| a.iter().any(|t| t == "task"))
     {
         specs.extend(env.specs(config.agent));
+    }
+    // Claude searches with Anthropic's own tool instead of crack's.
+    if config.server_web_search && config.endpoint.is_first_party_claude() {
+        specs.retain(|s| s.name != "websearch");
     }
     // A subagent can talk back to the agent that started it.
     if config.team_link.is_some() {
@@ -409,6 +415,7 @@ pub(crate) async fn turn_loop(
                             .context_window
                             .map_or(100_000, |w| (w / 2).max(50_000))
                     }),
+                    web_search: config.server_web_search && config.endpoint.is_first_party_claude(),
                 },
                 &mut sink,
             )
@@ -449,6 +456,9 @@ pub(crate) async fn turn_loop(
                     "The response hit the output token limit.".into(),
                 ));
             }
+            // Claude paused a long server-side tool run (web search): send the conversation
+            // back as it is and it carries on. No new user message.
+            StopReason::Other(reason) if reason == "pause_turn" => continue,
             _ => {}
         }
 
@@ -835,6 +845,7 @@ pub fn estimate_tokens(history: &[Message]) -> u64 {
             Part::ToolUse { input, .. } => input.to_string().len(),
             Part::ToolResult { content, .. } => content.len(),
             Part::Compaction { content, .. } => content.len(),
+            Part::Server { block } => block.to_string().len(),
             // Providers charge roughly 1,600 tokens for a typical screenshot.
             Part::Image { .. } => 6_400,
         })
@@ -909,6 +920,7 @@ pub async fn compact(
                 max_tokens: 16_000,
                 compaction: false,
                 clear_tool_results_at: None,
+                web_search: false,
             },
             &mut sink,
         )
@@ -949,6 +961,7 @@ async fn server_compact(
                 max_tokens: config.max_tokens,
                 compaction: true,
                 clear_tool_results_at: None,
+                web_search: false,
             },
             &mut sink,
         )

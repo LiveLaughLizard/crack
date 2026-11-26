@@ -136,6 +136,7 @@ pub async fn test_connection(
         max_tokens: 64,
         compaction: false,
         clear_tool_results_at: None,
+        web_search: false,
     };
     tokio::time::timeout(
         std::time::Duration::from_secs(60),

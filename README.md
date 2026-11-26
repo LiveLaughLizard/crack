@@ -549,7 +549,10 @@ works with no setup:
 
 `auto` tries them in that order and falls back when one fails. Pick one with
 `web_search = "zai"`, `"searxng"` or `"duckduckgo"`, or turn it off with
-`web_search = "off"`. Air-gapped builds don't include it.
+`web_search = "off"`. With `web_search = "anthropic"`, Claude (on Anthropic's own API) uses
+Anthropic's web search tool instead, which runs on Anthropic's servers and is billed
+per search; other models fall back to `auto`. This has not been tried against the live
+API yet. Air-gapped builds don't include it.
 
 ## Background commands
 

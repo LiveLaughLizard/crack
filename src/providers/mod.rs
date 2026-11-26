@@ -73,6 +73,12 @@ pub enum Part {
         content: String,
         signature: String,
     },
+    /// A block from Claude's server-side tools (web search, the code it runs to filter
+    /// results, their results), kept exactly as sent and passed back to Claude as is.
+    /// Other providers never see it.
+    Server {
+        block: Value,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -177,6 +183,8 @@ pub struct ChatRequest<'a> {
     /// Let Claude clear old tool results once the prompt passes this many tokens
     /// (context editing). Only first-party Anthropic endpoints honor it.
     pub clear_tool_results_at: Option<u64>,
+    /// Give Claude Anthropic's own web search tool (first-party Anthropic only).
+    pub web_search: bool,
 }
 
 /// What a provider reports while a response streams in.

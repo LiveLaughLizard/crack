@@ -54,7 +54,11 @@ pub async fn search(
     max: usize,
     http: &reqwest::Client,
 ) -> anyhow::Result<(Vec<Hit>, &'static str)> {
-    let mode = settings.mode.as_str();
+    // "anthropic" means Claude uses its own tool; any other model searches as in auto.
+    let mode = match settings.mode.as_str() {
+        "anthropic" => "auto",
+        other => other,
+    };
     anyhow::ensure!(mode != "off", "web search is off (web_search = \"off\")");
     let mut errors = Vec::new();
     if matches!(mode, "auto" | "zai")

@@ -579,6 +579,7 @@ mod tests {
             max_tokens: 64_000,
             compaction: false,
             clear_tool_results_at: None,
+            web_search: false,
         };
         // DeepSeek: minimal switches thinking off, anything else sets the effort.
         let mut deepseek = endpoint(
@@ -632,6 +633,7 @@ mod tests {
             max_tokens: 100,
             compaction: false,
             clear_tool_results_at: None,
+            web_search: false,
         };
         let body = endpoint(ReasoningParam::Thinking, false).body(&request(Effort::High));
         assert_eq!(body["thinking"]["type"], "enabled");

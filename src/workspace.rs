@@ -145,6 +145,7 @@ impl Workspace {
             trim_keep: self.config.trim_keep.unwrap_or(6),
             server_compaction: self.config.server_compaction.unwrap_or(false),
             clear_tool_results: self.config.clear_tool_results.unwrap_or(false),
+            server_web_search: self.config.web_search.as_deref() == Some("anthropic"),
             context_tokens: 0,
             team_link: None,
         })
