@@ -1093,10 +1093,7 @@ impl CrackView {
                 .child(title.to_owned())
         };
         let mut column = div()
-            .w(px(340.))
-            .flex_none()
-            .h_full()
-            .bg(theme::raised())
+            .min_h_full()
             .px(px(20.))
             .py(px(16.))
             .flex()
@@ -1492,9 +1489,19 @@ impl CrackView {
             column = column.child(skills);
         }
 
-        column
+        let column = column
             .child(div().flex_1())
-            .child(div().text_color(theme::muted()).child(self.location()))
+            .child(div().text_color(theme::muted()).child(self.location()));
+        // Scrolls when its sections don't fit; the handle keeps the position across refreshes.
+        div()
+            .id("sidebar")
+            .w(px(340.))
+            .flex_none()
+            .h_full()
+            .bg(theme::raised())
+            .overflow_y_scroll()
+            .track_scroll(&self.sidebar_scroll)
+            .child(column)
             .into_any_element()
     }
 }

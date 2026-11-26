@@ -179,6 +179,8 @@ pub struct CrackView {
     pub(super) team_tick: bool,
     /// The start screen's recent sessions, cached per (project, current session).
     pub(super) recent: Option<(String, Vec<crate::session::SessionSummary>)>,
+    /// Where the sidebar is scrolled to.
+    pub(super) sidebar_scroll: ScrollHandle,
     pub(super) follow: bool,
     pub(super) running: Option<Running>,
     pub(super) esc_armed: Option<Instant>,
@@ -293,6 +295,7 @@ impl CrackView {
             transcript_for: (String::new(), 0),
             team_tick: false,
             recent: None,
+            sidebar_scroll: ScrollHandle::new(),
             scroll: new_transcript(),
             follow: true,
             running: None,
