@@ -196,6 +196,8 @@ pub struct CrackView {
     pub(super) esc_armed: Option<Instant>,
     /// ctrl-d was pressed once; a second press within 2s closes the tab.
     pub(super) close_armed: Option<Instant>,
+    /// Showing the first-run welcome on the start screen.
+    pub(super) welcome: bool,
     pub(super) todos: Arc<Mutex<Vec<Todo>>>,
     /// "Allow for this session" rules of the active tab.
     pub(super) session_rules: Arc<Mutex<Vec<String>>>,
@@ -313,6 +315,7 @@ impl CrackView {
             running: None,
             esc_armed: None,
             close_armed: None,
+            welcome: !crate::state::State::load().welcomed,
             todos,
             session_rules: Arc::default(),
             approvals: HashMap::new(),
@@ -878,6 +881,12 @@ impl CrackView {
                 self.toggle_pin(&id, cx);
             }
             Some("branch") => self.branch_session(None, window, cx),
+            Some("welcome") => {
+                self.show_welcome(cx);
+                if !self.session.is_empty() {
+                    self.new_tab(window, cx);
+                }
+            }
             Some("rename") => {
                 if !args.is_empty() {
                     self.session.title = args.to_owned();
@@ -1015,6 +1024,8 @@ impl CrackView {
     // ---- Turns ----
 
     pub(super) fn start_turn(&mut self, text: String, cx: &mut Context<Self>) {
+        // The first prompt means the welcome has done its job.
+        self.dismiss_welcome(cx);
         if self.session.id.starts_with("sub-") {
             self.show_toast("This is a subagent's transcript, so it's read-only. Open a new tab (ctrl-x t) to keep working.", true, cx);
             return;

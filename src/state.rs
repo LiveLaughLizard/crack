@@ -23,6 +23,9 @@ pub struct State {
     /// Chosen in Settings: the interface font.
     #[serde(default)]
     pub font: Option<String>,
+    /// The first-run welcome was dismissed.
+    #[serde(default)]
+    pub welcomed: bool,
 }
 
 /// The state as last loaded or saved by this process. Saves go through the store's

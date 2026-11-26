@@ -103,7 +103,9 @@ impl CrackView {
                 ))
             });
         // The asset is 435x520.
-        let height = (window.viewport_size().height * 0.32).clamp(px(120.), px(260.));
+        // Smaller while the welcome needs the room.
+        let share = if self.welcome { 0.16 } else { 0.32 };
+        let height = (window.viewport_size().height * share).clamp(px(90.), px(260.));
         gpui::img(LOGO.clone())
             .h(height)
             .w(height * (435. / 520.))
@@ -492,7 +494,11 @@ impl CrackView {
                     .child(self.render_logo(window)),
             )
             .child(div().h(px(32.)))
-            .child(self.render_recent(cx))
+            .child(if self.welcome {
+                self.render_welcome(cx)
+            } else {
+                self.render_recent(cx)
+            })
             .child(
                 div().flex().flex_row().justify_center().child(
                     div()

@@ -15,6 +15,7 @@ mod theme;
 mod titlebar;
 mod undo;
 mod view;
+mod welcome;
 
 use crate::workspace::{Selection, Workspace};
 use gpui::{

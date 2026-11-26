@@ -270,6 +270,10 @@ left off.
 were open when you last quit. Sessions saved as JSON by older versions are imported on
 first start; the old files are kept in `sessions.imported/`.
 
+**First run.** The start screen shows a short welcome: connect a provider, try a sample
+prompt (click one to put it in the prompt), and the keys worth knowing. It goes away
+with **Got it** or your first prompt; `/welcome` shows it again.
+
 **Title bar.** crack draws its own: the icon, the tabs, the project name (drag it to move
 the window, double-click to maximize, right-click for the window menu) and the window
 buttons. On Linux the window edges resize it; macOS keeps its traffic lights.
