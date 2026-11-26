@@ -857,7 +857,7 @@ pub enum Answer {
 pub struct Sandbox {
     /// Wanted: forced by the build, or the user's toggle, config, or the default (on).
     pub wanted: bool,
-    /// bubblewrap is installed.
+    /// A sandbox works here (Landlock, Seatbelt, an AppContainer or bubblewrap).
     pub available: bool,
     /// This build forces the sandbox (`force-sandbox`); it can't be turned off.
     pub forced: bool,
@@ -907,6 +907,7 @@ impl Sandbox {
             wanted,
             available: crate::sandbox::native_available()
                 || crate::sandbox::seatbelt_available()
+                || crate::sandbox::windows_available()
                 || bwrap_installed(),
             forced,
             network: state
@@ -928,6 +929,8 @@ impl Sandbox {
             "built-in"
         } else if crate::sandbox::seatbelt_available() {
             "sandbox-exec"
+        } else if crate::sandbox::windows_available() {
+            "AppContainer"
         } else if bwrap_installed() {
             "bubblewrap"
         } else {
@@ -958,7 +961,8 @@ pub fn hidden_paths() -> Vec<PathBuf> {
 
 /// Wraps a shell command so it runs sandboxed: the system read-only, the project,
 /// /tmp and package caches writable, secrets hidden, and no network unless allowed.
-/// Uses the built-in sandbox (Landlock) where the kernel has it, else bubblewrap.
+/// Uses Seatbelt on macOS, an AppContainer on Windows, and on Linux the built-in
+/// sandbox (Landlock) where the kernel has it, else bubblewrap.
 pub fn sandboxed(command: &str, settings: &Sandbox, root: &Path) -> Option<Vec<String>> {
     if crate::sandbox::seatbelt_available() {
         let mut writable = vec![
@@ -982,6 +986,12 @@ pub fn sandboxed(command: &str, settings: &Sandbox, root: &Path) -> Option<Vec<S
         ];
         writable.extend(settings.writable.iter().filter(|p| p.exists()).cloned());
         return crate::sandbox::command(command, &writable, &hidden_paths(), settings.network);
+    }
+    if crate::sandbox::windows_available() {
+        // The container gets its own temporary folder, and can't read the profile.
+        let mut writable = vec![root.to_owned()];
+        writable.extend(settings.writable.iter().filter(|p| p.exists()).cloned());
+        return crate::sandbox::command(command, &writable, &[], settings.network);
     }
     let bwrap = which("bwrap")?;
     let mut args: Vec<String> = vec![

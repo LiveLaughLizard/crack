@@ -12,8 +12,27 @@
 //! Landlock only grants access, so "all but ~/.ssh" is built by walking from `/`
 //! toward each hidden path and granting every sibling on the way. The directories on
 //! the way get listing rights only, so a hidden file's name may show, never its contents.
+//!
+//! On Windows the helper can't lock itself down; it starts the command in an
+//! AppContainer instead and waits for it (see `sandbox_windows.rs`).
 
 use std::path::{Path, PathBuf};
+
+#[cfg(windows)]
+#[path = "sandbox_windows.rs"]
+mod windows;
+
+/// The Windows sandbox works on this machine (checked once by running a command in it).
+pub fn windows_available() -> bool {
+    #[cfg(windows)]
+    {
+        windows::available()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
 
 /// The argument that makes crack act as the sandbox helper.
 pub const HELPER: &str = "__sandbox-exec";
@@ -60,11 +79,13 @@ pub fn command(
     if !network {
         argv.push("--no-network".into());
     }
-    argv.extend(["--".into(), "bash".into(), "-c".into(), command.to_owned()]);
+    argv.push("--".into());
+    argv.extend(crate::procs::shell_argv(command));
     Some(argv)
 }
 
-/// The helper: lock down, then become the command. Never returns.
+/// The helper: lock down, then become the command (on Windows: start it in an
+/// AppContainer and pass on its exit code). Never returns.
 pub fn run_helper(args: &[String]) -> ! {
     let mut writable = Vec::new();
     let mut hidden = Vec::new();
@@ -86,12 +107,34 @@ pub fn run_helper(args: &[String]) -> ! {
     if program.is_empty() {
         fail("no command given");
     }
+    // Windows: the command runs in an AppContainer, which can't read the user's
+    // profile at all, so `hidden` isn't needed.
+    #[cfg(windows)]
+    {
+        let _ = hidden;
+        match windows::run(&writable, network, &program) {
+            Ok(code) => std::process::exit(code as i32),
+            Err(error) => fail(&format!("couldn't start the sandbox: {error}")),
+        }
+    }
+    #[cfg(not(windows))]
+    run_locked_down(&writable, &hidden, network, &program)
+}
+
+/// Locks this process down, then becomes the command.
+#[cfg(not(windows))]
+fn run_locked_down(
+    writable: &[PathBuf],
+    hidden: &[PathBuf],
+    network: bool,
+    program: &[String],
+) -> ! {
     if !network && let Err(error) = isolate_network() {
         fail(&format!(
             "couldn't block the network ({error}); turn sandbox network on, or the sandbox off"
         ));
     }
-    if let Err(error) = restrict_files(&writable, &hidden) {
+    if let Err(error) = restrict_files(writable, hidden) {
         fail(&format!("couldn't restrict file access: {error}"));
     }
     #[cfg(unix)]
@@ -125,7 +168,7 @@ fn isolate_network() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn isolate_network() -> std::io::Result<()> {
     Err(std::io::Error::other("only on Linux"))
 }
@@ -155,7 +198,7 @@ fn restrict_files(writable: &[PathBuf], hidden: &[PathBuf]) -> anyhow::Result<()
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn restrict_files(_: &[PathBuf], _: &[PathBuf]) -> anyhow::Result<()> {
     anyhow::bail!("only on Linux")
 }

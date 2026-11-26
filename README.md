@@ -64,9 +64,10 @@ There are also macOS (Apple Silicon) `.tar.gz` and Windows `.zip` downloads of t
 default build. They're built and tested in CI but not yet on real machines. For macOS
 there's also `…-app.zip`, a `Crack.app` with the icon for the Dock and Applications
 (`crack update` updates the plain binary from the `.tar.gz`, not the app). On macOS,
-shell commands run under `sandbox-exec`. Windows has no sandbox yet, so commands outside
-the safe list ask first unless your rules allow them; they run in Git Bash when it's installed, else
-PowerShell.
+shell commands run under `sandbox-exec`. On Windows they run in Git Bash when it's
+installed, else PowerShell, inside an AppContainer (the sandbox Windows uses for store
+apps; nothing to install, no administrator rights). If AppContainers don't work on a
+machine, commands outside the safe list ask first unless your rules allow them.
 
 The binary needs the usual desktop libraries: Wayland or X11 (`libxkbcommon`), Vulkan
 (`libvulkan1`), fontconfig and freetype.
@@ -704,6 +705,17 @@ own keys can't be read. crack uses its **built-in sandbox** (Linux Landlock, so 
 nothing to install, on kernel 5.13 or later). On older kernels it uses
 [bubblewrap](https://github.com/containers/bubblewrap) if installed, and otherwise asks
 before commands.
+
+On Windows the sandbox is an AppContainer, which works a little differently:
+- Commands can write only to the project and the package caches that exist, and keep
+  temporary files in a folder of their own.
+- They can read Windows, Program Files, the project and the folders of tools installed
+  in your user folder that are on `PATH` (such as `~/.cargo` and `~/.rustup`). The rest
+  of your user folder can't be read at all.
+- To allow this, crack adds an entry for the sandbox to those folders' permissions and
+  marks the writable ones low integrity. This stays, so the first command in a large
+  project takes a moment.
+- Even with network allowed, commands can't reach servers on `localhost`.
 
 Because the sandbox confines them, unknown commands don't need to ask. `ctrl-p` has:
 - **Sandbox: on / off**
