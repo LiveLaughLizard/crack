@@ -19,7 +19,7 @@ mod welcome;
 
 use crate::workspace::{Selection, Workspace};
 use gpui::{
-    App, AppContext as _, Application, Bounds, KeyBinding, TitlebarOptions, WindowBounds,
+    App, AppContext as _, Application, Bounds, KeyBinding, Pixels, TitlebarOptions, WindowBounds,
     WindowOptions, actions, px, size,
 };
 
@@ -171,6 +171,10 @@ fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// The smallest the window can be resized to.
+const MIN_WIDTH: Pixels = px(900.);
+const MIN_HEIGHT: Pixels = px(750.);
+
 /// Opens the window and runs until it closes.
 pub fn run(
     workspace: Workspace,
@@ -193,15 +197,15 @@ pub fn run(
             .map(|d| d.bounds().size)
             .unwrap_or(size(px(1920.), px(1080.)));
         let default_size = size(
-            (screen.width * 0.6).clamp(px(900.), px(1280.)),
-            (screen.height * 0.6).clamp(px(560.), px(720.)),
+            (screen.width * 0.6).clamp(MIN_WIDTH, px(1280.)),
+            (screen.height * 0.6).clamp(MIN_HEIGHT, px(900.)),
         );
         // The size the window had last time, kept within the screen.
         let remembered = crate::state::State::load();
         let window_size = match (remembered.window_width, remembered.window_height) {
             (Some(w), Some(h)) => size(
-                px(w).clamp(px(520.), screen.width.max(px(520.))),
-                px(h).clamp(px(380.), screen.height.max(px(380.))),
+                px(w).clamp(MIN_WIDTH, screen.width.max(MIN_WIDTH)),
+                px(h).clamp(MIN_HEIGHT, screen.height.max(MIN_HEIGHT)),
             ),
             _ => default_size,
         };
@@ -215,7 +219,7 @@ pub fn run(
             .open_window(
                 WindowOptions {
                     window_bounds: Some(window_bounds),
-                    window_min_size: Some(size(px(520.), px(380.))),
+                    window_min_size: Some(size(MIN_WIDTH, MIN_HEIGHT)),
                     // crack draws its own title bar (ui/titlebar.rs).
                     titlebar: Some(TitlebarOptions {
                         title: Some(title.into()),
