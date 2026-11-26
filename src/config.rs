@@ -41,6 +41,9 @@ pub struct Config {
     pub background_wait_secs: Option<u64>,
     /// An idle window starts a turn when a subagent finishes or asks something (default true).
     pub wake_on_background: Option<bool>,
+    /// On Linux, install crack's icon and desktop entry under ~/.local/share so the
+    /// window shows its icon (default true).
+    pub desktop_integration: Option<bool>,
     /// A SearXNG server for `websearch` (needs `format=json` enabled).
     pub searxng_url: Option<String>,
     /// Trim old tool output when the conversation fills this share of the context window
@@ -238,6 +241,9 @@ impl Config {
         }
         if layer.wake_on_background.is_some() {
             self.wake_on_background = layer.wake_on_background;
+        }
+        if layer.desktop_integration.is_some() {
+            self.desktop_integration = layer.desktop_integration;
         }
         if layer.searxng_url.is_some() {
             self.searxng_url = layer.searxng_url;

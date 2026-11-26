@@ -260,6 +260,15 @@ prompt; click one to pick it up where you left off.
 were open when you last quit. Sessions saved as JSON by older versions are imported on
 first start; the old files are kept in `sessions.imported/`.
 
+**Title bar.** crack draws its own: the icon, the tabs, the project name (drag it to move
+the window, double-click to maximize, right-click for the window menu) and the window
+buttons. On Linux the window edges resize it; macOS keeps its traffic lights.
+
+**Icon on Linux.** Desktops find a window's icon through its desktop entry, which a
+downloaded or self-built binary doesn't have, so crack installs its icon (and, unless
+a package already provides one, a `crack.desktop`) under `~/.local/share` at startup.
+Set `desktop_integration = false` to stop it.
+
 **Tabs.** Each tab is a session. A turn keeps running when you switch to another tab:
 running tabs show a spinner, and a note appears when a background tab finishes. Click a
 tab to switch to it. Close it with its ×, a middle-click or `ctrl-x w`; closing a

@@ -12,6 +12,7 @@ mod commands;
 mod config;
 mod context;
 mod delegate;
+mod desktop;
 mod doctor;
 mod export;
 mod git;
@@ -617,6 +618,9 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
                 }
             });
             let (workspace, mut selection) = load_workspace(&common)?;
+            if workspace.config.desktop_integration.unwrap_or(true) {
+                crate::desktop::integrate();
+            }
             // The window remembers the last effort; an explicit -e wins.
             if common.effort.is_none()
                 && let Some(effort) = state::State::load().effort

@@ -1533,7 +1533,7 @@ impl Render for CrackView {
             .relative()
             .size_full()
             .flex()
-            .flex_row()
+            .flex_col()
             .bg(theme::bg())
             .text_color(theme::text())
             .font_family(theme::font())
@@ -1610,19 +1610,18 @@ impl Render for CrackView {
             .on_action(
                 cx.listener(|this, _: &CloseTabArmed, window, cx| this.close_tab_armed(window, cx)),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .child(self.render_tab_bar(cx))
-                    .child(div().flex_1().min_h_0().child(main)),
-            );
+            .child(self.render_title_bar(window, cx));
+        // Below the title bar: the conversation, and the sidebar beside it.
+        let mut body = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_row()
+            .child(div().flex_1().min_w_0().h_full().child(main));
         if sidebar {
-            root = root.child(self.render_sidebar(cx));
+            body = body.child(self.render_sidebar(cx));
         }
+        root = root.child(body);
 
         if let Some((picker, _)) = &self.picker {
             root = root.child(
@@ -1702,7 +1701,8 @@ impl Render for CrackView {
             );
         }
         let _ = Agent::Build;
-        root
+        // Resize edges last, so they sit above everything along the window's border.
+        root.children(super::titlebar::resize_handles(window))
     }
 }
 
@@ -1824,20 +1824,17 @@ impl CrackView {
 
 impl CrackView {
     /// One tab per open session; click to switch, × or middle-click to close.
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let accent = theme::agent_color(self.selection.agent);
+        // Inside the title bar, which supplies the background and the border.
         let mut bar = div()
             .id("tab-bar")
             .flex()
             .flex_row()
             .items_end()
-            .h(px(34.))
-            .flex_none()
-            .px(px(12.))
+            .h_full()
+            .px(px(4.))
             .gap(px(2.))
-            .bg(theme::bg())
-            .border_b_1()
-            .border_color(theme::border())
             .overflow_x_scroll()
             .text_size(theme::SMALL_SIZE);
         for (index, (id, title, running, active)) in self.tab_summaries().into_iter().enumerate() {

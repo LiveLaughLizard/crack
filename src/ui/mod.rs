@@ -12,6 +12,7 @@ mod providers;
 pub mod render;
 mod settings;
 mod theme;
+mod titlebar;
 mod undo;
 mod view;
 
@@ -203,10 +204,13 @@ pub fn run(
                 WindowOptions {
                     window_bounds: Some(window_bounds),
                     window_min_size: Some(size(px(520.), px(380.))),
+                    // crack draws its own title bar (ui/titlebar.rs).
                     titlebar: Some(TitlebarOptions {
                         title: Some(title.into()),
-                        ..Default::default()
+                        appears_transparent: true,
+                        traffic_light_position: Some(gpui::point(px(12.), px(12.))),
                     }),
+                    window_decorations: Some(gpui::WindowDecorations::Client),
                     app_id: Some("crack".into()),
                     ..Default::default()
                 },
