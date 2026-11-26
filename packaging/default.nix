@@ -64,7 +64,9 @@ rustPlatform.buildRustPackage {
 
   postInstall = ''
     install -Dm644 packaging/crack.desktop $out/share/applications/crack.desktop
-    install -Dm644 assets/logo.png $out/share/pixmaps/crack.png
+    install -Dm644 assets/icon-512.png $out/share/icons/hicolor/512x512/apps/crack.png
+    install -Dm644 assets/icon-64.png $out/share/icons/hicolor/64x64/apps/crack.png
+    install -Dm644 assets/icon-512.png $out/share/pixmaps/crack.png
     install -Dm644 LICENSE $out/share/licenses/crack/LICENSE
   '';
 

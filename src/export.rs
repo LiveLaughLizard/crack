@@ -287,10 +287,15 @@ pub fn html(session: &Session) -> (String, usize) {
             p.0, p.1, p.2, p.3, p.4, p.5, p.6, p.7, p.8
         )
     };
+    let favicon = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        include_bytes!("../assets/icon-64.png"),
+    );
     let page = format!(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
+<link rel="icon" type="image/png" href="data:image/png;base64,{favicon}">
 <style>
 :root{{{dark}color-scheme:dark}}
 @media (prefers-color-scheme: light){{:root:not([data-theme="dark"]){{{light}color-scheme:light}}}}

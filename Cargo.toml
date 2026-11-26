@@ -145,6 +145,9 @@ gpui = { version = "=0.2.2", default-features = false, features = ["runtime_shad
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
 
+[build-dependencies]
+winresource = { version = "0.1", default-features = false }
+
 [dev-dependencies]
 # The MCP tests' OAuth server parses forms and checks PKCE challenges.
 url = "2"

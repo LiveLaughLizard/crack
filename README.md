@@ -61,7 +61,9 @@ AppImageUpdate and AppImageLauncher can update it in place (it carries its updat
 information), and so can `crack update`.
 
 There are also macOS (Apple Silicon) `.tar.gz` and Windows `.zip` downloads of the
-default build. They're built and tested in CI but not yet on real machines. On macOS,
+default build. They're built and tested in CI but not yet on real machines. For macOS
+there's also `…-app.zip`, a `Crack.app` with the icon for the Dock and Applications
+(`crack update` updates the plain binary from the `.tar.gz`, not the app). On macOS,
 shell commands run under `sandbox-exec`. Windows has no sandbox yet, so commands outside
 the safe list ask first unless your rules allow them; they run in Git Bash when it's installed, else
 PowerShell.
