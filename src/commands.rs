@@ -13,6 +13,8 @@ pub struct Command {
     pub name: String,
     pub description: String,
     pub argument_hint: Option<String>,
+    /// `allowed-tools` from the frontmatter: what its `!` snippets may run.
+    pub allowed_tools: Vec<String>,
     pub path: PathBuf,
     /// For a plugin's command: `CLAUDE_PLUGIN_ROOT` and friends.
     pub env: Vec<(String, String)>,
@@ -54,6 +56,9 @@ fn collect(dir: &Path, prefix: &str, env: &[(String, String)], out: &mut Vec<Com
                     name,
                     description,
                     argument_hint: crate::skills::frontmatter_value(front, "argument-hint"),
+                    allowed_tools: crate::skills::frontmatter_value(front, "allowed-tools")
+                        .map(|v| split_tools(&v))
+                        .unwrap_or_default(),
                     path,
                     env: env.to_vec(),
                 });
@@ -114,6 +119,61 @@ pub fn discover(cwd: &Path) -> Vec<Command> {
     out
 }
 
+/// Runs a command body's `` !`command` `` snippets and puts their output in their
+/// place, as Claude Code does. Only what the permission policy allows without asking
+/// runs (the safe list, the user's allow rules and the command file's own
+/// `allowed-tools`), in the sandbox when it's on; anything else is left as a note.
+pub fn run_shell_snippets(
+    body: &str,
+    allowed_tools: &[String],
+    policy: &crate::policy::Policy,
+    sandbox: Option<&crate::policy::Sandbox>,
+    cwd: &Path,
+) -> String {
+    let snippet = regex::Regex::new(r"!`([^`\n]+)`").expect("valid regex");
+    if !snippet.is_match(body) {
+        return body.to_owned();
+    }
+    let policy = policy.clone().with_session_rules(allowed_tools);
+    snippet
+        .replace_all(body, |caps: &regex::Captures| {
+            let command = caps[1].trim();
+            match policy.check("bash", &serde_json::json!({"command": command})) {
+                crate::policy::Decision::Allow => run_snippet(command, sandbox, cwd),
+                crate::policy::Decision::Ask(why) | crate::policy::Decision::Deny(why) => {
+                    format!(
+                        "[`{command}` was not run: {why}. Run it yourself if you need its output.]"
+                    )
+                }
+            }
+        })
+        .into_owned()
+}
+
+fn run_snippet(command: &str, sandbox: Option<&crate::policy::Sandbox>, cwd: &Path) -> String {
+    let root = crate::context::project_root(cwd);
+    let argv = match sandbox.filter(|s| s.active()) {
+        Some(s) => match crate::policy::sandboxed(command, s, &root) {
+            Some(argv) => argv,
+            None => return format!("[`{command}` was not run: the sandbox couldn't start]"),
+        },
+        None => crate::procs::shell_argv(command),
+    };
+    let output = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .output();
+    match output {
+        Ok(out) => {
+            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&out.stderr));
+            crate::tools::truncate_middle(text.trim_end(), 8_000)
+        }
+        Err(error) => format!("[`{command}` failed to start: {error}]"),
+    }
+}
+
 /// Fills in a command's body: `$ARGUMENTS`, `$1`..`$9` and plugin variables.
 pub fn render(command: &Command, args: &str) -> anyhow::Result<String> {
     let text = std::fs::read_to_string(&command.path)?;
@@ -127,8 +187,36 @@ pub fn render(command: &Command, args: &str) -> anyhow::Result<String> {
     Ok(crate::plugins::substitute(&out, &command.env))
 }
 
-/// For a prompt starting with `/name`: the command's text, for the model to follow.
-pub fn expand(prompt: &str, cwd: &Path) -> Option<String> {
+/// `Bash(git status:*), Read` → rules, splitting on commas outside parentheses.
+fn split_tools(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0;
+    let mut current = String::new();
+    for c in value.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(std::mem::take(&mut current).trim().to_owned());
+                continue;
+            }
+            _ => {}
+        }
+        current.push(c);
+    }
+    out.push(current.trim().to_owned());
+    out.retain(|t| !t.is_empty());
+    out
+}
+
+/// For a prompt starting with `/name`: the command's text, for the model to follow,
+/// with its `!` snippets run (see `run_shell_snippets`).
+pub fn expand(
+    prompt: &str,
+    cwd: &Path,
+    policy: &crate::policy::Policy,
+    sandbox: Option<&crate::policy::Sandbox>,
+) -> Option<String> {
     let rest = prompt.trim_start().strip_prefix('/')?;
     let (name, args) = rest
         .split_once(char::is_whitespace)
@@ -136,6 +224,7 @@ pub fn expand(prompt: &str, cwd: &Path) -> Option<String> {
     let first_line_args = args.lines().next().unwrap_or("").trim();
     let command = discover(cwd).into_iter().find(|c| c.name == name)?;
     let text = render(&command, first_line_args).ok()?;
+    let text = run_shell_snippets(&text, &command.allowed_tools, policy, sandbox, cwd);
     Some(format!(
         "<command-message>The user ran the /{name} command. Its instructions:</command-message>\n{text}"
     ))
@@ -158,20 +247,37 @@ mod tests {
         std::fs::write(commands.join("db/migrate.md"), "Migrate to $1.").unwrap();
         std::fs::create_dir_all(dir.join(".git")).unwrap();
 
+        let policy = crate::policy::Policy::new(
+            &Default::default(),
+            &dir,
+            crate::policy::Mode::Normal,
+            false,
+        );
         let found = discover(&dir);
         let review = found.iter().find(|c| c.name == "review").unwrap();
         assert_eq!(review.description, "Review a file");
         assert_eq!(review.argument_hint.as_deref(), Some("<file>"));
         assert!(found.iter().any(|c| c.name == "db:migrate"));
 
-        let text = expand("/review src/main.rs fast", &dir).unwrap();
+        let text = expand("/review src/main.rs fast", &dir, &policy, None).unwrap();
         assert!(text.contains("Review src/main.rs carefully. All: src/main.rs fast"));
         assert!(
-            expand("/db:migrate v2", &dir)
+            expand("/db:migrate v2", &dir, &policy, None)
                 .unwrap()
                 .contains("Migrate to v2.")
         );
-        assert!(expand("/nope", &dir).is_none());
+        assert!(expand("/nope", &dir, &policy, None).is_none());
+
+        // `!` snippets: safe ones run, others are left as a note.
+        std::fs::write(
+            commands.join("status.md"),
+            "---\nallowed-tools: Bash(printf:*)\n---\nEcho: !`echo hello there`\nPrintf: !`printf granted`\nRisky: !`rm -rf /tmp/nothing-here`",
+        )
+        .unwrap();
+        let text = expand("/status", &dir, &policy, None).unwrap();
+        assert!(text.contains("Echo: hello there"), "{text}");
+        assert!(text.contains("Printf: granted"), "{text}");
+        assert!(text.contains("was not run"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

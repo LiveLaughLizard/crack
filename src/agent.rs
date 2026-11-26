@@ -261,8 +261,21 @@ pub(crate) async fn turn_loop(
         added.extend(ctx.mcp.expand_prompt(&prompt).await);
     }
     // A custom or plugin `/command`.
-    if let Some(text) = crate::commands::expand(&prompt, &ctx.cwd) {
-        added.push(text);
+    {
+        // It may run `!` snippets: off the async thread.
+        let (prompt, cwd, policy, sandbox) = (
+            prompt.clone(),
+            ctx.cwd.clone(),
+            config.policy.clone(),
+            ctx.sandbox.clone(),
+        );
+        if let Ok(Some(text)) = tokio::task::spawn_blocking(move || {
+            crate::commands::expand(&prompt, &cwd, &policy, sandbox.as_ref())
+        })
+        .await
+        {
+            added.push(text);
+        }
     }
     // `@path` mentions attach files.
     added.extend(tools::expand_file_mentions(&prompt, &ctx.cwd));

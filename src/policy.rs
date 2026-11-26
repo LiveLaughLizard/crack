@@ -114,12 +114,16 @@ impl Rule {
         let tool = canonical_tool(tool);
         let pattern = match pattern {
             None | Some("") | Some("*") => None,
+            // Claude Code's `git status:*` means any command starting with `git status`.
             Some(p) if tool == "bash" => Some(Pattern::Command(
-                globset::GlobBuilder::new(p.trim_end_matches(":*").trim())
-                    .literal_separator(false)
-                    .build()
-                    .ok()?
-                    .compile_matcher(),
+                globset::GlobBuilder::new(&match p.strip_suffix(":*") {
+                    Some(prefix) => format!("{}*", prefix.trim()),
+                    None => p.trim().to_owned(),
+                })
+                .literal_separator(false)
+                .build()
+                .ok()?
+                .compile_matcher(),
             )),
             Some(p) if tool == "webfetch" => Some(Pattern::Domain(
                 p.strip_prefix("domain:").unwrap_or(p).to_owned(),

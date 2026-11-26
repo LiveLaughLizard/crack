@@ -782,6 +782,11 @@ single words; frontmatter can set `description` and `argument-hint`. Subfolders 
 `:` segments (`commands/db/migrate.md` is `/db:migrate`), and plugin commands are
 `/plugin:name` (or just `/name` when nothing else uses it).
 
+As in Claude Code, `` !`git status` `` in a command runs and its output takes its place.
+Only what your permission rules already allow runs (the safe list, your `allow` rules,
+and the command's own `allowed-tools` frontmatter, e.g. `Bash(git diff:*)`), in the
+sandbox when it's on; anything else is left as a note for the model.
+
 ## Instructions and skills
 
 Instruction files go into the system prompt, in this order:
