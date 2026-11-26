@@ -104,9 +104,16 @@ jobs:
       - name: Headless smoke test against the mock
         shell: bash
         run: |
-          cargo build --examples
-          MOCK_ADDR=127.0.0.1:8765 ./target/debug/examples/mock_provider &
-          sleep 2
+          cargo build --bin crack --examples
+          MOCK_ADDR=127.0.0.1:8765 ./target/debug/examples/mock_provider > mock.txt 2>&1 &
+          sleep 3
+          set +e
           CRACK_BASE_URL=http://127.0.0.1:8765/v1 CRACK_DATA_DIR="$RUNNER_TEMP/crack" \
-            ./target/debug/crack run -m custom/mock --format json "say: hello from CI" | tee out.json
-          grep -q '"type":"done"' out.json
+            ./target/debug/crack run -m custom/mock --format json "say: hello from CI" > out.json 2> err.txt
+          status=$?
+          cat out.json err.txt
+          if [ $status -ne 0 ] || ! grep -q '"type":"done"' out.json; then
+            report=$( { echo "exit $status"; tail -20 out.json; echo "--- stderr"; tail -30 err.txt; echo "--- mock"; tail -10 mock.txt; } | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=smoke::$report"
+            exit 1
+          fi
