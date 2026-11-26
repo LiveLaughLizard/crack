@@ -61,6 +61,10 @@ pub enum Entry {
     Notice {
         text: String,
     },
+    /// A note the user sent to a running turn (`/btw`, ctrl-enter).
+    Aside {
+        text: String,
+    },
     Error {
         text: String,
     },
@@ -386,6 +390,24 @@ impl Session {
                         .push(crate::providers::Part::Text { text: text.clone() });
                     let index = self.messages.len() - 1;
                     self.saved_messages = self.saved_messages.min(index);
+                }
+            }
+            AgentEvent::Injected { text, aside } => {
+                // Mirrors what the agent added, so the next turn's history has it.
+                match self.messages.last_mut() {
+                    Some(last) if last.role == crate::providers::Role::User => last
+                        .parts
+                        .push(crate::providers::Part::Text { text: text.clone() }),
+                    _ => self
+                        .messages
+                        .push(crate::providers::Message::user_text(text.clone())),
+                }
+                let index = self.messages.len() - 1;
+                self.saved_messages = self.saved_messages.min(index);
+                if let Some(aside) = aside {
+                    self.entries.push(Entry::Aside {
+                        text: aside.clone(),
+                    });
                 }
             }
             AgentEvent::Checkpoint {

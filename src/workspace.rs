@@ -149,6 +149,7 @@ impl Workspace {
                 crate::policy::Sandbox::resolve(&self.config.permissions).active(),
             ),
             session_rules: Default::default(),
+            asides: Default::default(),
             approvals: None,
             context_window: self.registry.caps(&model_ref).context,
             compact_at: self.config.compact_at.unwrap_or(0.8).clamp(0.3, 0.95),

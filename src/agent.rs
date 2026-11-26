@@ -60,6 +60,12 @@ pub enum AgentEvent {
     PromptBlocked(String),
     /// Hooks added context to the user's message.
     UserContext(String),
+    /// Text added to the history between steps (news from background work, or a
+    /// note the user sent mid-turn, which `aside` holds as they typed it).
+    Injected {
+        text: String,
+        aside: Option<String>,
+    },
     /// The history was replaced by a summary to make room.
     Compacted {
         messages: Vec<Message>,
@@ -98,6 +104,9 @@ pub struct TurnConfig {
     pub policy: crate::policy::Policy,
     /// "Allow for this session" answers, shared with the tab so they outlive the turn.
     pub session_rules: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Notes the user sends while the turn runs (`/btw`); each reaches the model before
+    /// its next request. What's left when the turn ends is the caller's to send.
+    pub asides: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Where to ask for approval; `None` (headless) refuses what would need it.
     pub approvals: Option<mpsc::UnboundedSender<ApprovalRequest>>,
     /// Lets the model start subagents (`task`); `None` inside a subagent.
@@ -347,14 +356,24 @@ pub(crate) async fn turn_loop(
             .collect();
             if !news.is_empty() {
                 let text = news.join("\n\n");
-                match history.last_mut() {
-                    Some(last) if last.role == Role::User => last.parts.push(Part::Text { text }),
-                    _ => history.push(Message::user_text(text)),
-                }
+                inject(history, &text);
+                let _ = events.send(AgentEvent::Injected { text, aside: None });
                 let _ = events.send(AgentEvent::Notice(
                     "Updates from background work reached the model.".into(),
                 ));
             }
+        }
+        // Notes the user sent while the model worked, before its next request.
+        let asides = std::mem::take(&mut *config.asides.lock().unwrap());
+        for aside in asides {
+            let text = format!(
+                "<user_aside>\nThe user sent this while you were working. Take it into account and carry on:\n\n{aside}\n</user_aside>"
+            );
+            inject(history, &text);
+            let _ = events.send(AgentEvent::Injected {
+                text,
+                aside: Some(aside),
+            });
         }
         // Trim old tool output first: it keeps the conversation itself, and one trim
         // costs one prompt-cache rewrite, so it runs in batches well before compacting.
@@ -1322,6 +1341,16 @@ pub fn trim_tool_output(
     Some((out, trimmed, freed))
 }
 
+/// Adds text to the history's last user message, or starts one.
+fn inject(history: &mut Vec<Message>, text: &str) {
+    match history.last_mut() {
+        Some(last) if last.role == Role::User => last.parts.push(Part::Text {
+            text: text.to_owned(),
+        }),
+        _ => history.push(Message::user_text(text.to_owned())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1390,5 +1419,45 @@ mod tests {
         assert!(!thinking(&trimmed[7]));
         assert!(thinking(&trimmed[9]));
         assert!(thinking(&trimmed[19]));
+    }
+
+    #[test]
+    fn asides_join_the_tool_results_and_the_tab_mirrors_them() {
+        let mut history = calls(1, 10);
+        inject(&mut history, "btw: use tabs");
+        // Added to the pending tool results, not a new message: providers want
+        // results right after their calls.
+        assert_eq!(history.len(), 3);
+        assert!(matches!(&history[2].parts[1], Part::Text { text } if text == "btw: use tabs"));
+
+        // The tab's copy of the history gets the same text, and the transcript shows
+        // what the user typed.
+        let mut session = crate::session::Session::new(&std::env::temp_dir());
+        session.messages = calls(1, 10);
+        session.apply(
+            &AgentEvent::Injected {
+                text: "btw: use tabs".into(),
+                aside: Some("use tabs".into()),
+            },
+            Agent::Build,
+            "m",
+        );
+        assert_eq!(json!(session.messages), json!(history));
+        assert!(matches!(
+            session.entries.last(),
+            Some(crate::session::Entry::Aside { text }) if text == "use tabs"
+        ));
+
+        // After an answer (no pending results) it starts a new user message.
+        let mut answered = vec![
+            Message::user_text("go"),
+            Message {
+                role: Role::Assistant,
+                parts: vec![Part::Text { text: "ok".into() }],
+            },
+        ];
+        inject(&mut answered, "and another thing");
+        assert_eq!(answered.len(), 3);
+        assert_eq!(answered[2].role, Role::User);
     }
 }

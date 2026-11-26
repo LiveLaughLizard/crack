@@ -1032,6 +1032,7 @@ fn start(
         max_steps: Some(env.max_steps),
         policy,
         session_rules: config.session_rules.clone(),
+        asides: Default::default(),
         approvals: config.approvals.clone(),
         context_window: env.registry.caps(&model_ref).context,
         compact_at: config.compact_at,

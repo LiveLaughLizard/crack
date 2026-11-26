@@ -290,6 +290,53 @@ impl CrackView {
             column = column.child(list);
         }
 
+        // Messages waiting for the running turn to end.
+        if !self.queued.is_empty() {
+            let mut list =
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .pb(px(6.))
+                    .text_size(theme::SMALL_SIZE)
+                    .child(div().text_color(theme::muted()).child(
+                        "Queued, sent when this turn ends (ctrl-enter tells it now instead)",
+                    ));
+            for (i, text) in self.queued.iter().enumerate() {
+                list = list.child(
+                    div()
+                        .id(("queued", i))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(10.))
+                        .py(px(3.))
+                        .bg(theme::raised())
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme::text_soft())
+                                .child(text.replace('\n', " ")),
+                        )
+                        .child(
+                            div()
+                                .id(("unqueue", i))
+                                .flex_none()
+                                .px(px(4.))
+                                .text_color(theme::muted())
+                                .hover(|d| d.text_color(theme::text()))
+                                .cursor_pointer()
+                                .child("\u{00d7}")
+                                .on_click(cx.listener(move |this, _, _, cx| this.unqueue(i, cx))),
+                        ),
+                );
+            }
+            column = column.child(list);
+        }
+
         column = column.child(
             div()
                 .key_context("Prompt")
@@ -979,6 +1026,25 @@ impl CrackView {
                     )
                     .into_any_element()
             }
+            Entry::Aside { text } => div()
+                .id(("aside", index))
+                .ml(px(24.))
+                .flex()
+                .flex_row()
+                .gap(px(8.))
+                .border_l_2()
+                .border_color(theme::border())
+                .px(px(10.))
+                .py(px(4.))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(theme::SMALL_SIZE)
+                        .text_color(theme::muted())
+                        .child("btw"),
+                )
+                .child(div().text_color(theme::text_soft()).child(text.clone()))
+                .into_any_element(),
             Entry::Notice { text } => div()
                 .pl(px(24.))
                 .text_color(theme::muted())

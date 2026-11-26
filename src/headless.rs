@@ -296,7 +296,7 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
                             failed = true;
                             json!({"type": "error", "text": format!("A hook blocked this prompt: {reason}")})
                         }
-                        AgentEvent::UserContext(_) => continue,
+                        AgentEvent::UserContext(_) | AgentEvent::Injected { .. } => continue,
                         AgentEvent::SubagentUsage(_) | AgentEvent::Cost(_) => continue,
                         AgentEvent::SubagentStatus { id, text } => {
                             json!({"type": "subagent_status", "id": id, "text": text})

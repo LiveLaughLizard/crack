@@ -37,6 +37,7 @@ actions!(
         Cut,
         Copy,
         Submit,
+        SubmitAside,
         Newline,
     ]
 );
@@ -73,7 +74,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-c", Copy, ctx),
         KeyBinding::new("enter", Submit, ctx),
         KeyBinding::new("shift-enter", Newline, ctx),
-        KeyBinding::new("ctrl-enter", Newline, ctx),
+        // ctrl-enter (cmd-enter on macOS) tells the running turn without waiting.
+        KeyBinding::new("secondary-enter", SubmitAside, ctx),
         KeyBinding::new("alt-enter", Newline, ctx),
         KeyBinding::new("ctrl-j", Newline, ctx),
     ]);
@@ -82,6 +84,8 @@ pub fn bind_keys(cx: &mut App) {
 #[derive(Clone, Debug)]
 pub enum InputEvent {
     Submit,
+    /// ctrl-enter: send to the running turn now.
+    SubmitAside,
     Changed,
     /// Up on the first line (history, list navigation).
     Up,
@@ -375,6 +379,10 @@ impl TextInput {
 
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(InputEvent::Submit);
+    }
+
+    fn submit_aside(&mut self, _: &SubmitAside, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(InputEvent::SubmitAside);
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
@@ -942,6 +950,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::submit_aside))
             .on_action(cx.listener(Self::newline))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))

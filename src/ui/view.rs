@@ -28,6 +28,8 @@ pub(super) struct Running {
     pub started: Instant,
     /// When the model last sent anything; a long gap shows a "working" row.
     pub last_event: Instant,
+    /// Notes for the running turn (`/btw`, ctrl-enter), read before its next request.
+    pub asides: Arc<Mutex<Vec<String>>>,
 }
 
 #[derive(Clone)]
@@ -65,6 +67,11 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
     ("reload", "Reload AGENTS.md, skills and config", &[]),
     ("copy", "Copy the last response", &[]),
     ("rename", "Rename the session: /rename <title>", &[]),
+    (
+        "btw",
+        "Tell the running turn something without stopping it: /btw <note> (or ctrl-enter)",
+        &[],
+    ),
     (
         "pin",
         "Pin or unpin this session (pinned ones list first)",
@@ -201,6 +208,8 @@ pub struct CrackView {
     pub(super) todos: Arc<Mutex<Vec<Todo>>>,
     /// "Allow for this session" rules of the active tab.
     pub(super) session_rules: Arc<Mutex<Vec<String>>>,
+    /// Messages sent while a turn runs, sent in order when it ends.
+    pub(super) queued: Vec<String>,
     /// Tool calls waiting for approval, by tab.
     pub(super) approvals: HashMap<u64, agent::ApprovalRequest>,
     /// For a file change waiting on approval: its hunks and which are ticked.
@@ -316,6 +325,7 @@ impl CrackView {
             running: None,
             esc_armed: None,
             close_armed: None,
+            queued: Vec::new(),
             welcome: !crate::state::State::load().welcomed,
             todos,
             session_rules: Arc::default(),
@@ -585,6 +595,13 @@ impl CrackView {
     ) {
         match event {
             InputEvent::Changed => self.update_autocomplete(cx),
+            InputEvent::SubmitAside => {
+                let text = self.input.read(cx).text().to_owned();
+                if !text.trim().is_empty() {
+                    self.input.update(cx, |input, cx| input.set_text("", cx));
+                    self.send_aside(text, cx);
+                }
+            }
             InputEvent::Submit => {
                 if !self.autocomplete.is_empty() {
                     self.accept_autocomplete(true, window, cx);
@@ -771,7 +788,7 @@ impl CrackView {
             return;
         };
         self.autocomplete.clear();
-        let takes_args = item.skill || matches!(item.name.as_str(), "rename" | "cd");
+        let takes_args = item.skill || matches!(item.name.as_str(), "rename" | "cd" | "btw");
         let mention = item.label.starts_with('@');
         if run && !takes_args && !mention {
             self.input.update(cx, |input, cx| input.set_text("", cx));
@@ -792,6 +809,8 @@ impl CrackView {
     ) {
         let text = text.trim().to_owned();
         if text.is_empty() {
+            // Enter on an empty prompt sends what's queued (kept after an interrupt).
+            self.send_queued(cx);
             return;
         }
         self.history_pos = None;
@@ -806,12 +825,9 @@ impl CrackView {
             }
         }
         if self.running.is_some() {
-            self.show_toast(
-                "A turn is running. Press esc twice to interrupt it.",
-                true,
-                cx,
-            );
-            self.input.update(cx, |input, cx| input.set_text(text, cx));
+            // Sent when the turn ends; ctrl-enter tells the running turn instead.
+            self.queued.push(text);
+            cx.notify();
             return;
         }
         self.start_turn(text, cx);
@@ -888,6 +904,7 @@ impl CrackView {
                     self.new_tab(window, cx);
                 }
             }
+            Some("btw") => self.send_aside(args.to_owned(), cx),
             Some("rename") => {
                 if !args.is_empty() {
                     self.session.title = args.to_owned();
@@ -1083,6 +1100,8 @@ impl CrackView {
         let mut config = config;
         config.approvals = Some(approvals_tx);
         config.session_rules = self.session_rules.clone();
+        let asides: Arc<Mutex<Vec<String>>> = Arc::default();
+        config.asides = asides.clone();
         let tools = self
             .ws
             .tool_context(&self.session.id, self.todos.clone(), None);
@@ -1090,6 +1109,7 @@ impl CrackView {
         crate::runtime::spawn(agent::run_turn(config, history, tools, events_tx, cancel));
         self.running = Some(Running {
             cancel: cancel_tx,
+            asides,
             started: Instant::now(),
             last_event: Instant::now(),
         });
@@ -1149,8 +1169,12 @@ impl CrackView {
         if let Some(running) = self.running.as_mut() {
             running.last_event = Instant::now();
         }
-        if let AgentEvent::Done { .. } = event {
-            self.running = None;
+        if let AgentEvent::Done { interrupted, .. } = event {
+            // Notes the turn ended before reading go first in the queue.
+            if let Some(running) = self.running.take() {
+                let left = std::mem::take(&mut *running.asides.lock().unwrap());
+                self.queued.splice(0..0, left);
+            }
             crate::recovery::clear(&self.session.id);
             self.refresh_git(cx);
             self.esc_armed = None;
@@ -1158,6 +1182,55 @@ impl CrackView {
             if let Err(error) = self.session.save() {
                 self.show_toast(format!("Could not save the session: {error}"), true, cx);
             }
+            // After an interrupt the queue waits: the user may want to change course.
+            if interrupted {
+                if !self.queued.is_empty() {
+                    self.show_toast(
+                        "Interrupted: queued messages are kept. Press enter to send the next one.",
+                        false,
+                        cx,
+                    );
+                }
+            } else {
+                self.send_queued(cx);
+            }
+        }
+    }
+
+    /// Starts the next queued message, if the tab is idle.
+    pub(super) fn send_queued(&mut self, cx: &mut Context<Self>) {
+        if self.running.is_none() && !self.queued.is_empty() {
+            let next = self.queued.remove(0);
+            self.start_turn(next, cx);
+        }
+    }
+
+    /// Tells the running turn something before its next step; idle, it's just sent.
+    pub(super) fn send_aside(&mut self, text: String, cx: &mut Context<Self>) {
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            self.show_toast(
+                "Type a note first: /btw <note>, or ctrl-enter in the prompt",
+                true,
+                cx,
+            );
+            return;
+        }
+        match &self.running {
+            Some(running) => {
+                running.asides.lock().unwrap().push(text);
+                self.show_toast("Sent: the model sees it before its next step", false, cx);
+            }
+            None => self.start_turn(text, cx),
+        }
+        cx.notify();
+    }
+
+    /// Takes a queued message back out.
+    pub(super) fn unqueue(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.queued.len() {
+            self.queued.remove(index);
+            cx.notify();
         }
     }
 
@@ -1646,7 +1719,7 @@ impl CrackView {
         .into_iter()
         .collect();
         let group = |name: &str| match name {
-            "new" | "sessions" | "rename" | "pin" | "branch" | "copy" | "tab" | "close" => {
+            "new" | "sessions" | "rename" | "pin" | "branch" | "copy" | "tab" | "close" | "btw" => {
                 "Session"
             }
             "settings" => "System",
@@ -1661,7 +1734,9 @@ impl CrackView {
         };
         let mut items: Vec<PickerItem> = COMMANDS
             .iter()
-            .filter(|(name, _, _)| !matches!(*name, "rename" | "cd") && command_available(name))
+            .filter(|(name, _, _)| {
+                !matches!(*name, "rename" | "cd" | "btw") && command_available(name)
+            })
             .map(|(name, description, _)| PickerItem {
                 id: name.to_string(),
                 title: description.to_string(),
@@ -1935,6 +2010,8 @@ pub(super) struct TabState {
     pub esc_armed: Option<Instant>,
     /// What was typed in the prompt but not sent.
     pub draft: String,
+    /// Messages waiting for the running turn to end.
+    pub queued: Vec<String>,
 }
 
 impl CrackView {
@@ -1953,6 +2030,7 @@ impl CrackView {
             scroll: std::mem::replace(&mut self.scroll, new_transcript()),
             esc_armed: self.esc_armed.take(),
             draft,
+            queued: std::mem::take(&mut self.queued),
         }
     }
 
@@ -1969,9 +2047,12 @@ impl CrackView {
         // The restored list was built for this tab's session.
         self.transcript_for = (self.session.id.clone(), self.scroll.item_count());
         self.esc_armed = tab.esc_armed;
+        self.queued = tab.queued;
         self.autocomplete.clear();
         let draft = tab.draft;
         self.input.update(cx, |input, cx| input.set_text(draft, cx));
+        // A turn that ended while the tab was in the background left these waiting.
+        self.send_queued(cx);
         cx.notify();
     }
 
@@ -1986,6 +2067,7 @@ impl CrackView {
             scroll: new_transcript(),
             esc_armed: None,
             draft: String::new(),
+            queued: Vec::new(),
         }
     }
 
@@ -2157,7 +2239,10 @@ impl CrackView {
             running.last_event = Instant::now();
         }
         if let AgentEvent::Done { .. } = event {
-            state.running = None;
+            if let Some(running) = state.running.take() {
+                let left = std::mem::take(&mut *running.asides.lock().unwrap());
+                state.queued.splice(0..0, left);
+            }
             crate::recovery::clear(&state.session.id);
             state.esc_armed = None;
             state.session.todos = state.todos.lock().unwrap().clone();
@@ -2165,7 +2250,15 @@ impl CrackView {
             if let Err(error) = state.session.save() {
                 self.show_toast(format!("Could not save the session: {error}"), true, cx);
             } else {
-                self.show_toast(format!("Finished in another tab: {title}"), false, cx);
+                let more = if state.queued.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " ({} queued, sent when you switch to it)",
+                        state.queued.len()
+                    )
+                };
+                self.show_toast(format!("Finished in another tab: {title}{more}"), false, cx);
             }
             self.refresh_git(cx);
         }

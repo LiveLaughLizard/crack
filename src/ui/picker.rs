@@ -128,7 +128,7 @@ impl Picker {
                     InputEvent::Up => this.move_selection(-1, cx),
                     InputEvent::Down => this.move_selection(1, cx),
                     InputEvent::PasteImage(_) => {}
-                    InputEvent::Submit => this.confirm(cx),
+                    InputEvent::Submit | InputEvent::SubmitAside => this.confirm(cx),
                 },
             );
         window.focus(&search.focus_handle(cx));

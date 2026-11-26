@@ -162,6 +162,11 @@ fn markdown_into(session: &Session, w: &mut Writer, depth: usize, images: &mut V
                 }
                 w.raw("\n</details>\n");
             }
+            Entry::Aside { text } => {
+                w.raw("\n**You, mid-turn:** ");
+                w.text(text.trim());
+                w.raw("\n");
+            }
             Entry::Notice { text } => {
                 w.raw("\n> ");
                 w.text(text.trim());

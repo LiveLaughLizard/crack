@@ -74,10 +74,13 @@ The binary needs the usual desktop libraries: Wayland or X11 (`libxkbcommon`), V
 **Nix:**
 
 ```sh
-nix run github:LiveLaughLizard/crack            # try it
+nix run github:LiveLaughLizard/crack
 nix profile install github:LiveLaughLizard/crack
-nix build .#airgap                                # or .#no-china, .#strict
 ```
+
+`nix run` tries crack without installing it; `nix profile install` installs it. From a
+clone, `nix build .#airgap` (or `.#no-china`, `.#strict`) builds one of the restricted
+builds described under [Build types](#build-types).
 
 The package includes the desktop entry and icon. Its PATH also has git, ripgrep and
 bubblewrap.
@@ -225,6 +228,7 @@ that issued it.
 | Key | Action |
 |---|---|
 | `enter` / `shift-enter`, `ctrl-j` | Send / new line |
+| `ctrl-enter` (`cmd-enter` on macOS) | Tell the running turn now, same as `/btw` |
 | `tab`, `shift-tab` | Cycle agent: Build (all tools) and Plan (read-only) |
 | `ctrl-p` | Command palette |
 | `ctrl-x p` | Providers: connect API keys, cloud accounts and local servers |
@@ -243,8 +247,17 @@ that issued it.
 
 Slash commands: `/connect`, `/new`, `/sessions`, `/models`, `/effort [level]`, `/agents`,
 `/skills`, `/init` (write AGENTS.md), `/reload`, `/copy`, `/rename <title>`,
-`/cd <dir>`, `/sidebar`, `/tab`, `/close`, `/mcp`, `/help`, `/exit`, and
+`/cd <dir>`, `/sidebar`, `/tab`, `/close`, `/mcp`, `/help`, `/exit`, `/btw <note>`, and
 `/<skill-name> [request]`.
+
+**While a turn runs**, you can keep typing:
+
+- `enter` queues the message. Queued messages show above the prompt (click × to drop
+  one) and are sent in order when the turn ends. After an interrupt they wait; press
+  `enter` on an empty prompt to send the next one.
+- `ctrl-enter` (or `/btw <note>`) tells the running turn now, without stopping it. The
+  model sees the note before its next step, and it shows in the transcript as "btw".
+  If the turn finishes before reading it, it is sent as the next message.
 
 Sessions are saved in a SQLite database, `~/.local/share/crack/crack.db` (or
 `$CRACK_DATA_DIR`), as they happen, so a crash loses at most the last few events.
@@ -318,23 +331,36 @@ knows what it ran and can run it again. Trimming happens in batches, so the prom
 is rewritten once per batch rather than on every turn. At 80%, crack summarizes the
 conversation and carries on from the summary; `/compact` does that by hand.
 
+These are the defaults:
+
 ```toml
-trim_at = 0.6      # set it to compact_at or higher to turn trimming off
-trim_keep = 6      # recent tool results left whole
+trim_at = 0.6
+trim_keep = 6
 compact_at = 0.8
-``` Models crack doesn't know need their window set:
-`[models."provider/model"] context = 131072`.
+```
+
+`trim_keep` is how many recent tool results stay whole. To turn trimming off, set
+`trim_at` to the same value as `compact_at` or higher.
+
+For a model crack doesn't know, set its context window size so these limits work:
+
+```toml
+[models."provider/model"]
+context = 131072
+```
 
 On Claude through Anthropic's own API, two beta features can help (both off by
 default; turn them on in Settings or the config):
 
 ```toml
-# Claude writes the summary itself, as a signed block it reads back exactly.
 server_compaction = true
-# Claude drops old tool results once the prompt passes half the window, keeping the
-# six most recent. Each clear costs one prompt-cache rewrite.
 clear_tool_results = true
 ```
+
+- `server_compaction`: Claude writes the summary itself, as a signed block it reads back
+  exactly.
+- `clear_tool_results`: Claude drops old tool results once the prompt passes half the
+  window, keeping the six most recent. Each clear costs one prompt-cache rewrite.
 
 If server compaction fails, crack falls back to its own summary.
 

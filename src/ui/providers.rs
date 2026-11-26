@@ -267,7 +267,7 @@ impl ProvidersDialog {
                 &input,
                 window,
                 |this: &mut Self, input, event: &InputEvent, window, cx| match event {
-                    InputEvent::Submit => this.save(window, cx),
+                    InputEvent::Submit | InputEvent::SubmitAside => this.save(window, cx),
                     InputEvent::Up => this.move_field(input, -1, window, cx),
                     InputEvent::Down => this.move_field(input, 1, window, cx),
                     InputEvent::Changed | InputEvent::PasteImage(_) => {}
