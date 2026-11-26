@@ -1603,13 +1603,13 @@ impl Render for CrackView {
                 this.follow = true;
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ClearOrQuit, _, cx| {
-                if this.input.read(cx).text().is_empty() {
-                    cx.quit();
-                } else {
-                    this.input.update(cx, |input, cx| input.set_text("", cx));
-                }
+            // ctrl-c only ever clears the prompt; quitting is ctrl-x q or the close button.
+            .on_action(cx.listener(|this, _: &ClearPrompt, _, cx| {
+                this.input.update(cx, |input, cx| input.set_text("", cx));
             }))
+            .on_action(
+                cx.listener(|this, _: &CloseTabArmed, window, cx| this.close_tab_armed(window, cx)),
+            )
             .child(
                 div()
                     .flex_1()

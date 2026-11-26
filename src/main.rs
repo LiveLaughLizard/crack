@@ -609,6 +609,13 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
             Ok(0)
         }
         Mode::Gui { common, prompt } => {
+            // Ctrl+C in the terminal that launched the window shouldn't close it (quit from the
+            // window). A handler, not SIG_IGN, so commands crack runs still get Ctrl+C normally.
+            crate::runtime::spawn(async {
+                while tokio::signal::ctrl_c().await.is_ok() {
+                    eprintln!("crack: Ctrl+C ignored; quit from the window (ctrl-x q)");
+                }
+            });
             let (workspace, mut selection) = load_workspace(&common)?;
             // The window remembers the last effort; an explicit -e wins.
             if common.effort.is_none()

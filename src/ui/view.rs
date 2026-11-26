@@ -184,6 +184,8 @@ pub struct CrackView {
     pub(super) follow: bool,
     pub(super) running: Option<Running>,
     pub(super) esc_armed: Option<Instant>,
+    /// ctrl-d was pressed once; a second press within 2s closes the tab.
+    pub(super) close_armed: Option<Instant>,
     pub(super) todos: Arc<Mutex<Vec<Todo>>>,
     /// "Allow for this session" rules of the active tab.
     pub(super) session_rules: Arc<Mutex<Vec<String>>>,
@@ -300,6 +302,7 @@ impl CrackView {
             follow: true,
             running: None,
             esc_armed: None,
+            close_armed: None,
             todos,
             session_rules: Arc::default(),
             approvals: HashMap::new(),
@@ -2691,5 +2694,24 @@ impl CrackView {
             .as_ref()
             .map(|(_, l)| l.clone())
             .unwrap_or_default()
+    }
+}
+
+impl CrackView {
+    /// ctrl-d: the first press arms, a second within 2 seconds closes this tab.
+    pub(super) fn close_tab_armed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .close_armed
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
+        {
+            self.close_armed = None;
+            self.toast = None;
+            let id = self.tab_id;
+            self.close_tab(id, window, cx);
+        } else {
+            self.close_armed = Some(Instant::now());
+            self.show_toast("Press ctrl-d again to close this tab.", false, cx);
+        }
+        cx.notify();
     }
 }

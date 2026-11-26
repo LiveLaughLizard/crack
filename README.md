@@ -238,7 +238,8 @@ that issued it.
 | `ctrl-x y` | Copy last response |
 | `esc esc` | Interrupt the running turn |
 | `up` / `down` | Prompt history |
-| `ctrl-c` | Clear the prompt; quit when it's empty |
+| `ctrl-c` | Clear the prompt (it never quits; `ctrl-x q` does) |
+| `ctrl-d` `ctrl-d` | Close this tab |
 
 Slash commands: `/connect`, `/new`, `/sessions`, `/models`, `/effort [level]`, `/agents`,
 `/skills`, `/init` (write AGENTS.md), `/reload`, `/copy`, `/rename <title>`,
@@ -250,7 +251,7 @@ Sessions are saved in a SQLite database, `~/.local/share/crack/crack.db` (or
 They're listed per project. In the Sessions picker (`ctrl-x l`):
 
 - typing searches the conversations themselves, not just titles;
-- `ctrl-d` pressed twice deletes a session.
+- `ctrl-d` pressed twice deletes a session (in the main window it closes the tab).
 
 A new tab's start screen lists the project's five most recent sessions above the
 prompt; click one to pick it up where you left off.
