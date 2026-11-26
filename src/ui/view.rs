@@ -43,6 +43,9 @@ pub(super) struct SlashItem {
     pub insert: String,
 }
 
+/// The most tabs open at once; they shrink to fit the title bar up to this many.
+pub(super) const MAX_TABS: usize = 15;
+
 pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
     ("new", "Start a new session", &["clear"]),
     (
@@ -915,7 +918,9 @@ impl CrackView {
             Some("cd") => self.change_dir(args, cx),
             Some("sidebar") => self.toggle_sidebar(window, cx),
             Some("mcp") => self.open_picker(PickerKind::Mcp, window, cx),
-            Some("tab") => self.new_tab(window, cx),
+            Some("tab") => {
+                self.new_tab(window, cx);
+            }
             Some("yolo") => self.toggle_yolo(cx),
             Some("accept-edits") => self.set_mode(crate::policy::Mode::AcceptEdits, cx),
             Some("review") => self.set_mode(crate::policy::Mode::Review, cx),
@@ -2085,7 +2090,9 @@ impl CrackView {
         }
         match Session::load(&id) {
             Ok(session) => {
-                self.new_tab(window, cx);
+                if !self.new_tab(window, cx) {
+                    return;
+                }
                 self.session = session;
                 self.follow = true;
                 cx.notify();
@@ -2096,7 +2103,17 @@ impl CrackView {
         }
     }
 
-    pub(super) fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens an empty tab after the current one and switches to it. Returns false (with
+    /// a toast) when `MAX_TABS` are already open.
+    pub(super) fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.tab_order.len() >= MAX_TABS {
+            self.show_toast(
+                format!("{MAX_TABS} tabs is the limit. Close one first (ctrl-d twice)."),
+                true,
+                cx,
+            );
+            return false;
+        }
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         let position = self
@@ -2110,6 +2127,7 @@ impl CrackView {
         let fresh = self.fresh_tab();
         self.restore_active(id, fresh, cx);
         self.focus_prompt(window, cx);
+        true
     }
 
     pub(super) fn switch_tab(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -2421,6 +2439,7 @@ impl CrackView {
             .sessions
             .iter()
             .filter_map(|id| Session::load(id).ok())
+            .take(MAX_TABS)
             .collect();
         if sessions.is_empty() {
             return;
@@ -2913,7 +2932,9 @@ impl CrackView {
             self.show_toast(format!("Couldn't save the branch: {error:#}"), true, cx);
             return;
         }
-        self.new_tab(window, cx);
+        if !self.new_tab(window, cx) {
+            return;
+        }
         *self.todos.lock().unwrap() = branch.todos.clone();
         self.session = branch;
         self.follow = true;

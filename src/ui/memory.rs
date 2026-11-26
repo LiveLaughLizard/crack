@@ -164,7 +164,9 @@ impl CrackView {
                 if let Ok(Some(memory)) = memories.get(id) {
                     match crate::session::Session::load(&memory.session) {
                         Ok(session) => {
-                            self.new_tab(window, cx);
+                            if !self.new_tab(window, cx) {
+                                return;
+                            }
                             self.session = session;
                             self.follow = true;
                         }

@@ -1638,7 +1638,9 @@ impl Render for CrackView {
                     this.open_providers(None, window, cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+                this.new_tab(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 let id = this.tab_id;
                 this.close_tab(id, window, cx)
@@ -1923,8 +1925,23 @@ impl CrackView {
 
 impl CrackView {
     /// One tab per open session; click to switch, × or middle-click to close.
-    pub(super) fn render_tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The tabs, sized like a browser's: full width while they fit in `room`, then
+    /// shrinking together (the active one keeps room for its close button), dropping
+    /// titles and close buttons as they get narrow.
+    pub(super) fn render_tab_bar(&self, room: f32, cx: &mut Context<Self>) -> AnyElement {
+        const FULL: f32 = 220.;
+        const GAP: f32 = 2.;
+        const ACTIVE_MIN: f32 = 120.;
         let accent = theme::agent_color(self.selection.agent);
+        let tabs = self.tab_summaries();
+        let count = tabs.len().max(1) as f32;
+        let room = (room - GAP * count).max(0.);
+        let even = (room / count).min(FULL);
+        let (active_width, other_width) = if even >= ACTIVE_MIN || count <= 1. {
+            (even.max(ACTIVE_MIN.min(room)), even)
+        } else {
+            (ACTIVE_MIN, ((room - ACTIVE_MIN) / (count - 1.)).max(24.))
+        };
         // Inside the title bar, which supplies the background and the border.
         let mut bar = div()
             .id("tab-bar")
@@ -1933,20 +1950,27 @@ impl CrackView {
             .items_end()
             .h_full()
             .px(px(4.))
-            .gap(px(2.))
-            .overflow_x_scroll()
+            .gap(px(GAP))
+            .overflow_hidden()
             .text_size(theme::SMALL_SIZE);
-        for (index, (id, title, running, active)) in self.tab_summaries().into_iter().enumerate() {
+        for (index, (id, title, running, active)) in tabs.into_iter().enumerate() {
+            let width = if active { active_width } else { other_width };
+            let show_title = width >= 64.;
+            let show_close = active || width >= 72.;
+            let roomy = width >= 90.;
             let mut tab = div()
                 .id(("tab", id as usize))
                 .flex()
                 .flex_row()
+                .flex_none()
                 .items_center()
-                .gap(px(8.))
+                .when(!show_title, |d| d.justify_center())
+                .gap(px(if roomy { 8. } else { 4. }))
                 .h(px(30.))
-                .max_w(px(240.))
-                .pl(px(12.))
-                .pr(px(6.))
+                .w(px(width))
+                .overflow_hidden()
+                .pl(px(if roomy { 12. } else { 6. }))
+                .pr(px(if roomy { 6. } else { 3. }))
                 .rounded_t(px(4.))
                 .cursor_pointer()
                 .border_t_2();
@@ -1969,7 +1993,7 @@ impl CrackView {
                 );
             } else if running {
                 tab = tab.child(spinner(("tab-spin", id as usize), accent));
-            } else if index < 9 {
+            } else if index < 9 || !show_title {
                 tab = tab.child(
                     div()
                         .text_color(theme::muted())
@@ -1977,20 +2001,25 @@ impl CrackView {
                 );
             }
             tab = tab
-                .child(div().flex_1().min_w_0().truncate().child(title))
-                .child(
-                    div()
-                        .id(("tab-close", id as usize))
-                        .px(px(4.))
-                        .rounded(px(3.))
-                        .text_color(theme::muted())
-                        .hover(|d| d.bg(theme::raised_max()).text_color(theme::text()))
-                        .child("×")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.close_tab(id, window, cx);
-                        })),
-                )
+                .when(show_title, |t| {
+                    t.child(div().flex_1().min_w_0().truncate().child(title))
+                })
+                .when(show_close, |t| {
+                    t.child(
+                        div()
+                            .id(("tab-close", id as usize))
+                            .flex_none()
+                            .px(px(4.))
+                            .rounded(px(3.))
+                            .text_color(theme::muted())
+                            .hover(|d| d.bg(theme::raised_max()).text_color(theme::text()))
+                            .child("×")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(id, window, cx);
+                            })),
+                    )
+                })
                 .on_click(cx.listener(move |this, _, window, cx| this.switch_tab(id, window, cx)))
                 .on_mouse_down(
                     MouseButton::Middle,
@@ -2010,7 +2039,9 @@ impl CrackView {
                 .cursor_pointer()
                 .hover(|d| d.bg(theme::raised_high()).text_color(theme::text()))
                 .child("+")
-                .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.new_tab(window, cx);
+                })),
         )
         .into_any_element()
     }

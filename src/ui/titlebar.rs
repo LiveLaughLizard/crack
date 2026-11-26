@@ -39,6 +39,16 @@ impl CrackView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // What the tabs may use: the width less the icon, the "+" button, a strip to
+        // drag the window by, and the window buttons.
+        let controls_width = if draws_controls(window) { 3. * 44. } else { 0. };
+        let leading_width = if cfg!(target_os = "macos") { 78. } else { 38. };
+        let tab_room = f32::from(window.viewport_size().width)
+            - leading_width
+            - controls_width
+            - 40.
+            - 36.
+            - 8.;
         let leading = if cfg!(target_os = "macos") {
             // Room for the traffic lights.
             div().w(px(78.)).flex_none().into_any_element()
@@ -83,7 +93,7 @@ impl CrackView {
                     .min_w_0()
                     .flex_shrink()
                     .h_full()
-                    .child(self.render_tab_bar(cx)),
+                    .child(self.render_tab_bar(tab_room, cx)),
             )
             .child(drag)
             .when(draws_controls(window), |bar| bar.child(controls(window)))

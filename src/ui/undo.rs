@@ -414,8 +414,8 @@ impl CrackView {
             Some(tab) => self.switch_tab(tab, window, cx),
             None => match crate::session::Session::load(id) {
                 Ok(session) => {
-                    if !self.session.is_empty() {
-                        self.new_tab(window, cx);
+                    if !self.session.is_empty() && !self.new_tab(window, cx) {
+                        return;
                     }
                     self.session = session;
                     self.follow = true;

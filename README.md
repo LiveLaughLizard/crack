@@ -235,7 +235,7 @@ that issued it.
 | `ctrl-x m`, `f2` | Model picker, cycle recent models |
 | `ctrl-t`, `ctrl-x e` | Cycle effort, effort picker |
 | `ctrl-x n`, `ctrl-x l` | New session in this tab, sessions |
-| `ctrl-x t`, `ctrl-x w` | New tab, close tab |
+| `ctrl-x t`, `ctrl-x w` | New tab (up to 15; they shrink to fit), close tab |
 | `ctrl-tab`, `ctrl-shift-tab`, `ctrl-x 1`–`9` | Next / previous tab, go to tab N |
 | `ctrl-x k` | Skills |
 | `ctrl-x b` | Toggle sidebar |
