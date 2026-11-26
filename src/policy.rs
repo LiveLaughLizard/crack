@@ -989,10 +989,27 @@ fn bwrap_installed() -> bool {
 }
 
 pub fn which(program: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")?
-        .to_str()?
-        .split(':')
-        .map(|dir| Path::new(dir).join(program))
+    // Windows finds `git` as `git.exe` (any PATHEXT extension).
+    let extensions: Vec<String> = if cfg!(windows) {
+        std::iter::once(String::new())
+            .chain(
+                std::env::var("PATHEXT")
+                    .unwrap_or_else(|_| ".EXE;.CMD;.BAT;.COM".into())
+                    .split(';')
+                    .filter(|e| !e.is_empty())
+                    .map(str::to_ascii_lowercase),
+            )
+            .collect()
+    } else {
+        vec![String::new()]
+    };
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .flat_map(|dir| {
+            extensions
+                .iter()
+                .map(move |ext| dir.join(format!("{program}{ext}")))
+                .collect::<Vec<_>>()
+        })
         .find(|p| p.is_file())
 }
 

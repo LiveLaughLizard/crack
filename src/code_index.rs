@@ -589,7 +589,8 @@ mod tests {
         std::fs::remove_file(root.join("src/lib.rs")).unwrap();
         index.refresh().unwrap();
         assert!(index.find("helper", None, 10).unwrap().is_empty());
-        std::fs::remove_dir_all(root).unwrap();
+        // Windows can't delete a database that is still open; cleanup is best effort.
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(all(feature = "lang-typescript", feature = "lang-python"))]

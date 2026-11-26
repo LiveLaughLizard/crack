@@ -548,6 +548,8 @@ mod tests {
         assert!(pattern.is_match("mcp__github__issue"));
     }
 
+    // These hooks are bash scripts.
+    #[cfg(unix)]
     #[tokio::test]
     async fn plugin_hooks_get_their_env_and_session_start_matches_the_source() {
         let mut config = config(
@@ -578,6 +580,8 @@ mod tests {
         assert!(resume.context.is_empty());
     }
 
+    // These hooks are bash scripts.
+    #[cfg(unix)]
     #[tokio::test]
     async fn block_git_push_and_format_after_edits() {
         let h = hooks(
@@ -665,6 +669,8 @@ mod tests {
         assert!(note.notices[0].contains("exited with 1"));
     }
 
+    // These hooks are bash scripts.
+    #[cfg(unix)]
     #[tokio::test]
     async fn project_hooks_wait_for_trust_and_time_out() {
         let mut config = config(

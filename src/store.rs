@@ -568,7 +568,7 @@ mod tests {
         store.set_kv("k", "v".into());
         store.flush();
         assert_eq!(store.kv("k").as_deref(), Some("v"));
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -597,6 +597,6 @@ mod tests {
         assert!(dir.join("sessions.imported").is_dir());
         assert!(!dir.join("sessions").exists());
         assert!(dir.join("prompt-history.json.imported").is_file());
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
