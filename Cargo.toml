@@ -135,6 +135,16 @@ force-sandbox = []
 # Windows needs GPUI's application manifest (default features are off above).
 [target.'cfg(windows)'.dependencies]
 gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
+# The Windows sandbox: AppContainers, ACLs and job objects.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 # macOS: compile GPUI's Metal shaders at startup instead of at build time (newer Xcode
 # ships the Metal compiler as a separate download).

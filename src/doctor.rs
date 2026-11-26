@@ -119,7 +119,15 @@ pub fn run(workspace: &mut Workspace, selection: &Selection) -> i32 {
             "off: shell commands run with your full permissions",
         );
     } else if !sandbox.available {
-        r.fail("sandbox", "on, but neither Landlock (Linux 5.13+) nor bubblewrap is available, so shell commands will ask first");
+        let missing = if cfg!(windows) {
+            "commands couldn't run in an AppContainer here"
+        } else {
+            "neither Landlock (Linux 5.13+) nor bubblewrap is available"
+        };
+        r.fail(
+            "sandbox",
+            format!("on, but {missing}, so shell commands will ask first"),
+        );
     } else {
         let root = crate::context::project_root(&workspace.cwd);
         let works = crate::policy::sandboxed("true", &sandbox, &root).is_some_and(|argv| {
