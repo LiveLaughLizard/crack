@@ -492,6 +492,7 @@ impl CrackView {
                     .child(self.render_logo(window)),
             )
             .child(div().h(px(32.)))
+            .child(self.render_recent(cx))
             .child(
                 div().flex().flex_row().justify_center().child(
                     div()
@@ -2292,5 +2293,85 @@ impl CrackView {
                             .child(body),
                     ),
             )
+    }
+}
+
+impl CrackView {
+    /// The last few sessions above the prompt on the start screen; click one to resume it.
+    fn render_recent(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let sessions = self.recent_sessions();
+        if sessions.is_empty() {
+            return div().into_any_element();
+        }
+        let today = chrono::Local::now().date_naive();
+        let mut list = div()
+            .w_full()
+            .max_w(px(780.))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .pb(px(16.))
+            .child(
+                div()
+                    .px(px(10.))
+                    .pb(px(4.))
+                    .text_size(theme::SMALL_SIZE)
+                    .text_color(theme::muted())
+                    .child("Recent sessions"),
+            );
+        for (i, s) in sessions.into_iter().enumerate() {
+            let when = chrono::DateTime::from_timestamp(s.updated, 0)
+                .map(|d| d.with_timezone(&chrono::Local))
+                .unwrap_or_else(chrono::Local::now);
+            let when = if when.date_naive() == today {
+                when.format("%H:%M").to_string()
+            } else {
+                when.format("%b %d").to_string()
+            };
+            let title = if s.title.trim().is_empty() {
+                "Untitled".to_owned()
+            } else {
+                s.title.clone()
+            };
+            let id = s.id.clone();
+            list = list.child(
+                div()
+                    .id(("recent-session", i))
+                    .flex()
+                    .flex_row()
+                    .justify_between()
+                    .gap(px(16.))
+                    .px(px(10.))
+                    .py(px(5.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(theme::selected_bg()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(theme::text_soft())
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(theme::SMALL_SIZE)
+                            .text_color(theme::muted())
+                            .child(when),
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.open_session(&id, window, cx)),
+                    ),
+            );
+        }
+        div()
+            .flex()
+            .flex_row()
+            .justify_center()
+            .child(list)
+            .into_any_element()
     }
 }

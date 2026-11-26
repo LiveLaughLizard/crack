@@ -250,6 +250,9 @@ They're listed per project. In the Sessions picker (`ctrl-x l`):
 - typing searches the conversations themselves, not just titles;
 - `ctrl-d` pressed twice deletes a session.
 
+A new tab's start screen lists the project's five most recent sessions above the
+prompt; click one to pick it up where you left off.
+
 `crack -s last` reopens the latest session, and a plain launch reopens the tabs that
 were open when you last quit. Sessions saved as JSON by older versions are imported on
 first start; the old files are kept in `sessions.imported/`.

@@ -177,6 +177,8 @@ pub struct CrackView {
     pub(super) transcript_for: (String, usize),
     /// A repaint is scheduled while subagents work in the background.
     pub(super) team_tick: bool,
+    /// The start screen's recent sessions, cached per (project, current session).
+    pub(super) recent: Option<(String, Vec<crate::session::SessionSummary>)>,
     pub(super) follow: bool,
     pub(super) running: Option<Running>,
     pub(super) esc_armed: Option<Instant>,
@@ -290,6 +292,7 @@ impl CrackView {
             input,
             transcript_for: (String::new(), 0),
             team_tick: false,
+            recent: None,
             scroll: new_transcript(),
             follow: true,
             running: None,
@@ -1341,24 +1344,7 @@ impl CrackView {
                     self.selection.agent = agent;
                 }
             }
-            PickerKind::Session => {
-                if let Some(tab) = self.tab_with_session(&id) {
-                    // Already open: go to it.
-                    self.switch_tab(tab, window, cx);
-                } else if self.running.is_some() {
-                    self.show_toast("Wait for the turn to finish first.", true, cx);
-                } else {
-                    match Session::load(&id) {
-                        Ok(session) => {
-                            *self.todos.lock().unwrap() = session.todos.clone();
-                            self.session = session;
-                            self.follow = true;
-                            self.expanded.clear();
-                        }
-                        Err(error) => self.show_toast(format!("{error}"), true, cx),
-                    }
-                }
-            }
+            PickerKind::Session => self.open_session(&id, window, cx),
             PickerKind::Skill => {
                 self.input
                     .update(cx, |input, cx| input.set_text(format!("/{id} "), cx));
@@ -2660,3 +2646,43 @@ impl CrackView {
 
 /// A file change waiting on approval: each hunk with its file, and which are ticked.
 pub(super) type ReviewHunks = (Vec<(String, crate::review::Hunk)>, Vec<bool>);
+
+impl CrackView {
+    /// Opens a saved session in this tab (or switches to the tab that has it open).
+    pub(super) fn open_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tab_with_session(id) {
+            self.switch_tab(tab, window, cx);
+        } else if self.running.is_some() {
+            self.show_toast("Wait for the turn to finish first.", true, cx);
+        } else {
+            match Session::load(id) {
+                Ok(session) => {
+                    *self.todos.lock().unwrap() = session.todos.clone();
+                    self.session = session;
+                    self.follow = true;
+                    self.expanded.clear();
+                }
+                Err(error) => self.show_toast(format!("{error}"), true, cx),
+            }
+        }
+        cx.notify();
+    }
+
+    /// The project's last few sessions, newest first, for the start screen.
+    pub(super) fn recent_sessions(&mut self) -> Vec<crate::session::SessionSummary> {
+        let root = context::project_root(&self.ws.cwd);
+        let key = format!("{}\n{}", root.display(), self.session.id);
+        if self.recent.as_ref().is_none_or(|(k, _)| *k != key) {
+            let list: Vec<_> = Session::list(&root)
+                .into_iter()
+                .filter(|s| s.id != self.session.id)
+                .take(5)
+                .collect();
+            self.recent = Some((key, list));
+        }
+        self.recent
+            .as_ref()
+            .map(|(_, l)| l.clone())
+            .unwrap_or_default()
+    }
+}
