@@ -147,7 +147,11 @@ pub async fn run_turn(
     let interrupted = tokio::select! {
         result = turn_loop(&config, &mut history, &tools, &events) => {
             if let Err(error) = result {
-                let _ = events.send(AgentEvent::Error(format!("{error:#}")));
+                let message = format!("{error:#}");
+                let _ = events.send(AgentEvent::Error(message.clone()));
+                // The turn ended in a failure rather than a normal stop.
+                let outcome = config.hooks.run("StopFailure", None, json!({"error": message})).await;
+                notify(&events, &outcome.notices);
             }
             false
         }
@@ -370,6 +374,11 @@ pub(crate) async fn turn_loop(
                     });
                     *history = summary;
                     just_compacted = true;
+                    let after = config
+                        .hooks
+                        .run("PostCompact", Some("auto"), json!({"trigger": "auto"}))
+                        .await;
+                    notify(events, &after.notices);
                 }
                 Err(error) => {
                     // Don't try again every step; the request may still fit.
@@ -482,7 +491,13 @@ pub(crate) async fn turn_loop(
             let outcome = config
                 .hooks
                 .run(
-                    "Stop",
+                    // Inside a subagent its stop is a SubagentStop: the user's Stop hooks are
+                    // about their own turns.
+                    if config.team_link.is_some() {
+                        "SubagentStop"
+                    } else {
+                        "Stop"
+                    },
                     None,
                     json!({"stop_hook_active": stop_continuations > 0}),
                 )
@@ -671,14 +686,20 @@ pub(crate) async fn turn_loop(
                 ..
             } = p;
             let Some(mut output) = output else { continue };
-            // Like Claude Code, PostToolUse runs only for tools that ran.
+            // Like Claude Code, PostToolUse runs only for tools that ran (and a failed
+            // call is a PostToolUseFailure).
+            let post_event = if output.is_error {
+                "PostToolUseFailure"
+            } else {
+                "PostToolUse"
+            };
             let post = if blocked {
                 crate::hooks::Outcome::default()
             } else {
                 config
                     .hooks
                     .run(
-                        "PostToolUse",
+                        post_event,
                         Some(&name),
                         json!({
                             "tool_input": crate::hooks::claude_input(&input),
@@ -688,6 +709,13 @@ pub(crate) async fn turn_loop(
                     .await
             };
             notify(events, &post.notices);
+            // A hook may rewrite an MCP tool's output (third-party data); crack's own tools'
+            // output stays as it is.
+            if let Some(replacement) = post.updated_output.clone()
+                && name.starts_with("mcp__")
+            {
+                output.content = replacement;
+            }
             // What hooks say after a tool goes to the model with its result.
             for note in post.block.iter().chain(&post.context) {
                 output.content.push_str(&format!("\n\n[hook] {note}"));
@@ -753,10 +781,36 @@ async fn permit(
     let refuse = |text: String| tools::ToolOutput::refused(text, title.clone());
     match decision {
         Decision::Allow => Ok(None),
-        Decision::Deny(reason) => Err(refuse(format!(
-            "Not allowed: {reason}. Don't retry this; if you need it, ask the user to change the permission rules."
-        ))),
+        Decision::Deny(reason) => {
+            denied(config, name, input, &reason, events).await;
+            Err(refuse(format!(
+                "Not allowed: {reason}. Don't retry this; if you need it, ask the user to change the permission rules."
+            )))
+        }
         Decision::Ask(reason) => {
+            // A PermissionRequest hook can answer for the user (in headless runs too).
+            let request = config
+                .hooks
+                .run(
+                    "PermissionRequest",
+                    Some(name),
+                    json!({"tool_input": crate::hooks::claude_input(input), "reason": reason}),
+                )
+                .await;
+            notify(events, &request.notices);
+            match request.permission {
+                Some(crate::hooks::Permission::Allow) => {
+                    return Ok(request
+                        .updated_input
+                        .map(|changed| (name.to_owned(), crate::hooks::crack_input(&changed))));
+                }
+                Some(crate::hooks::Permission::Deny) => {
+                    let why = request.block.unwrap_or_else(|| "a hook denied it".into());
+                    denied(config, name, input, &why, events).await;
+                    return Err(refuse(format!("Not allowed: {why}.")));
+                }
+                _ => {}
+            }
             let Some(approvals) = &config.approvals else {
                 if name == "git_commit" {
                     return Err(refuse(
@@ -812,12 +866,16 @@ async fn permit(
                         None => Ok(None),
                     }
                 }
-                Ok(Answer::Deny(note)) => Err(refuse(match note {
-                    Some(note) => format!("The user denied this: {note}"),
-                    None => {
-                        "The user denied this. Don't retry it; ask what they'd like instead.".into()
-                    }
-                })),
+                Ok(Answer::Deny(note)) => {
+                    denied(config, name, input, "the user said no", events).await;
+                    Err(refuse(match note {
+                        Some(note) => format!("The user denied this: {note}"),
+                        None => {
+                            "The user denied this. Don't retry it; ask what they'd like instead."
+                                .into()
+                        }
+                    }))
+                }
                 Err(_) => Err(refuse("The approval was cancelled.".into())),
             }
         }
@@ -1099,6 +1157,19 @@ async fn permit_batch(
 /// `task` and the team tools run concurrently (they may wait on subagents).
 fn is_team_tool(name: &str) -> bool {
     name == "task" || crate::delegate::TEAM_TOOLS.contains(&name)
+}
+
+/// Tells PermissionDenied hooks a call was refused (by a rule, a hook or the user).
+async fn denied(config: &TurnConfig, name: &str, input: &Value, reason: &str, events: &Events) {
+    let outcome = config
+        .hooks
+        .run(
+            "PermissionDenied",
+            Some(name),
+            json!({"tool_input": crate::hooks::claude_input(input), "reason": reason}),
+        )
+        .await;
+    notify(events, &outcome.notices);
 }
 
 /// Shows hook output in the transcript.

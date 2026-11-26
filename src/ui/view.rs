@@ -836,6 +836,15 @@ impl CrackView {
                     Err(error) => self.show_toast(format!("Config: {error}"), true, cx),
                 }
                 self.ws.reload_context();
+                crate::hooks::fire(
+                    &self.ws.config,
+                    &self.ws.cwd,
+                    &self.session.id,
+                    "InstructionsLoaded",
+                    None,
+                    serde_json::json!({"files": self.ws.instructions.len(), "skills": self.ws.skills.len()}),
+                    false,
+                );
                 self.connect_mcp(None, cx);
                 let text = format!(
                     "Reloaded: {} instruction file(s), {} skill(s).",
@@ -944,9 +953,19 @@ impl CrackView {
         } else {
             self.ws.cwd.join(target)
         };
+        let old_cwd = self.ws.cwd.clone();
         match Workspace::load(&target) {
             Ok(ws) => {
                 self.ws = ws;
+                crate::hooks::fire(
+                    &self.ws.config,
+                    &self.ws.cwd,
+                    &self.session.id,
+                    "CwdChanged",
+                    None,
+                    serde_json::json!({"old_cwd": old_cwd, "new_cwd": self.ws.cwd}),
+                    false,
+                );
                 self.new_session(cx);
                 self.discover_models(cx);
                 self.connect_mcp(None, cx);
@@ -2008,6 +2027,17 @@ impl CrackView {
             if let Some(tab) = self.background.remove(&id) {
                 crate::background::kill_session(&tab.session.id);
                 crate::delegate::stop_session(&tab.session.id);
+                if !tab.session.entries.is_empty() {
+                    crate::hooks::fire(
+                        &self.ws.config,
+                        &self.ws.cwd,
+                        &tab.session.id,
+                        "SessionEnd",
+                        Some("tab_closed"),
+                        serde_json::json!({"reason": "tab_closed"}),
+                        false,
+                    );
+                }
                 if let Some(running) = &tab.running {
                     let _ = running.cancel.send(true);
                 }
@@ -2018,6 +2048,17 @@ impl CrackView {
         }
         crate::background::kill_session(&self.session.id);
         crate::delegate::stop_session(&self.session.id);
+        if !self.session.entries.is_empty() {
+            crate::hooks::fire(
+                &self.ws.config,
+                &self.ws.cwd,
+                &self.session.id,
+                "SessionEnd",
+                Some("tab_closed"),
+                serde_json::json!({"reason": "tab_closed"}),
+                false,
+            );
+        }
         if let Some(running) = &self.running {
             let _ = running.cancel.send(true);
         }

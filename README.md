@@ -514,8 +514,37 @@ hooks = [{ type = "command", command = "./scripts/check-command.sh", timeout = 1
 command = "jq -r .prompt >> ~/.crack-prompts.log"
 ```
 
-**Events:** `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`,
-`Stop` and `Notification` (approval needed).
+**Events:**
+- **session:** `SessionStart`, `SessionEnd`, `CwdChanged` (`/cd`), `InstructionsLoaded`
+  (`/reload`);
+- **turn:** `UserPromptSubmit`, `Stop`, `StopFailure` (the turn ended in an error),
+  `PreCompact`, `PostCompact`;
+- **tools:** `PreToolUse`, `PostToolUse`, `PostToolUseFailure`;
+- **permissions:** `PermissionRequest` (before you're asked; it can answer for you, which
+  also works in headless runs), `PermissionDenied`, `Notification` (approval needed);
+- **subagents:** `SubagentStart` (its context goes into the subagent's prompt),
+  `SubagentStop`, `TaskCreated`, `TaskCompleted`.
+
+Inside a subagent, `Stop` hooks don't run; `SubagentStop` hooks do.
+
+**Hook types.** Besides `command`:
+- **`http`:** POSTs the event as JSON to `url` (with `headers`, where `${VAR}` expands)
+  and reads the reply as the answer.
+- **`prompt`:** the session's model checks the event against your `prompt` and lets it
+  through or stops it, with a reason.
+- **`mcp_tool`:** calls `tool` on MCP `server` with the event as `arguments.input`.
+
+Any hook can take `if`, a permission rule the tool call must match to run it
+(`if = "Bash(git push *)"`), and `async = true` to run without anything waiting for it.
+
+```toml
+[[hooks.PreToolUse]]
+matcher = "Bash"
+hooks = [
+  { type = "prompt", prompt = "Block anything that deletes files outside the project.", if = "Bash(rm *)" },
+  { type = "http", url = "https://audit.example.com/hook", async = true },
+]
+```
 
 **Input:** each hook gets the event as JSON on stdin: `hook_event_name`, `session_id`,
 `cwd`, `tool_name`, `tool_input`, `tool_response` and `prompt`.
@@ -533,7 +562,14 @@ command = "jq -r .prompt >> ~/.crack-prompts.log"
   `UserPromptSubmit` and `SessionStart`);
 - end the turn (`"continue": false`).
 
-Hooks run in parallel with a 60-second timeout. Hooks from a project's own config don't run
+When several hooks answer one event, the strictest permission answer wins (deny over ask
+over allow, in any order). `PermissionRequest` hooks answer with `decision.behavior`
+(`allow`, optionally with `updatedInput`, or `deny` with `message`); `PostToolUse` can
+replace an MCP tool's output with `updatedToolOutput`. Output from hooks you didn't
+write (a project's, a plugin's) is size-limited before it reaches the model; your own
+isn't.
+
+Hooks run in parallel with a 60-second timeout by default (`timeout`, up to 600). Hooks from a project's own config don't run
 until you trust them, by running `crack hooks trust` or from the command palette. `crack
 hooks` lists them all.
 

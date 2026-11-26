@@ -115,7 +115,15 @@ impl Workspace {
             model_ref: model_ref.clone(),
             endpoint: provider.endpoint.clone(),
             hooks: crate::hooks::Hooks::new(&self.config.hooks, &self.cwd, "")
-                .with_sandbox(crate::policy::Sandbox::resolve(&self.config.permissions)),
+                .with_sandbox(crate::policy::Sandbox::resolve(&self.config.permissions))
+                .with_services(crate::hooks::Services {
+                    judge: Some(judge(
+                        provider.endpoint.clone(),
+                        model.clone(),
+                        self.http.clone(),
+                    )),
+                    mcp: Some(self.mcp.clone()),
+                }),
             subagents: Some(std::sync::Arc::new(crate::delegate::SubagentEnv::new(
                 self.registry.clone(),
                 &self.cwd,
@@ -247,4 +255,37 @@ pub fn http_client() -> anyhow::Result<reqwest::Client> {
                  install them (e.g. the ca-certificates package)"
             )
         })
+}
+
+/// Answers `prompt` hooks with the session's own model, briefly and without tools.
+fn judge(
+    endpoint: crate::providers::Endpoint,
+    model: String,
+    http: reqwest::Client,
+) -> crate::hooks::Judge {
+    std::sync::Arc::new(move |question: String| {
+        let (endpoint, model, http) = (endpoint.clone(), model.clone(), http.clone());
+        Box::pin(async move {
+            let messages = [crate::providers::Message::user_text(question)];
+            let mut sink = |_| {};
+            let completion = endpoint
+                .complete(
+                    &http,
+                    crate::providers::ChatRequest {
+                        model: &model,
+                        system: "You check one event in a coding agent against a rule. Answer only with the JSON asked for.",
+                        messages: &messages,
+                        tools: &[],
+                        effort: crate::providers::Effort::Low,
+                        max_tokens: 1_000,
+                        compaction: false,
+                        clear_tool_results_at: None,
+                        web_search: false,
+                    },
+                    &mut sink,
+                )
+                .await?;
+            Ok(completion.message.text())
+        })
+    })
 }

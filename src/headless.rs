@@ -322,6 +322,15 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
         let _ = task.await;
         session.todos = todos.lock().unwrap().clone();
         crate::recovery::clear(&session.id);
+        crate::hooks::fire(
+            &workspace.config,
+            &workspace.cwd,
+            &session.id,
+            "SessionEnd",
+            Some("run_finished"),
+            serde_json::json!({"reason": "run_finished"}),
+            true,
+        );
         if let Err(error) = session.save() {
             eprintln!("warning: could not save the session: {error}");
         }

@@ -633,6 +633,7 @@ fn start(
     let task_info = info.clone();
     let task_link = link.clone();
     let call = call_id.to_owned();
+    let task_id = id.clone();
     let handle = tokio::spawn(async move {
         let info = task_info;
         let link = task_link;
@@ -651,6 +652,30 @@ fn start(
         link.bump();
         status(format!("starting on {model_ref}"));
 
+        // Hooks hear about the new task; SubagentStart may add context to its prompt.
+        let mut notices = hooks
+            .run(
+                "TaskCreated",
+                None,
+                json!({"task_id": task_id, "kind": "agent", "subagent_type": kind, "description": description}),
+            )
+            .await
+            .notices;
+        let start = hooks
+            .run(
+                "SubagentStart",
+                Some(&kind),
+                json!({"agent_id": task_id, "subagent_type": kind, "description": description}),
+            )
+            .await;
+        notices.extend(start.notices);
+        for notice in notices {
+            let _ = parent_events.send(AgentEvent::Notice(notice));
+        }
+        let mut prompt = prompt;
+        if !start.context.is_empty() {
+            prompt.push_str(&format!("\n\n{}", start.context.join("\n\n")));
+        }
         let mut history = vec![Message::user_text(prompt)];
         let (tx, mut rx) = mpsc::unbounded_channel();
         let started = Instant::now();
@@ -698,14 +723,15 @@ fn start(
         );
         let _ = session.save();
 
-        let hook = hooks
+        // (Its SubagentStop hooks ran as it stopped, inside the turn.)
+        let finished = hooks
             .run(
-                "SubagentStop",
+                "TaskCompleted",
                 None,
-                json!({"subagent_type": kind, "description": description}),
+                json!({"task_id": task_id, "kind": "agent", "subagent_type": kind, "description": description}),
             )
             .await;
-        for notice in hook.notices {
+        for notice in finished.notices {
             let _ = parent_events.send(AgentEvent::Notice(notice));
         }
 

@@ -210,6 +210,39 @@ struct Call<'a> {
     subject: Subject,
 }
 
+/// Whether a tool call matches one permission rule, e.g. `Bash(git push *)` or
+/// `Edit(src/**)`. Hooks use it for their `if` conditions.
+pub fn rule_matches(rule: &str, tool: &str, input: &Value, root: &Path, cwd: &Path) -> bool {
+    let Some(rule) = Rule::parse(rule, root) else {
+        return false;
+    };
+    let family = canonical_tool(tool);
+    let path = |key: &str| {
+        input
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|p| absolutize(&crate::config::expand_home(p), cwd))
+            .unwrap_or_else(|| cwd.to_owned())
+    };
+    let subject = match family.as_str() {
+        "bash" => Subject::Command(
+            input["command"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+        ),
+        "edit" | "read" => Subject::Path(path("path")),
+        "webfetch" => Subject::Url(input["url"].as_str().unwrap_or_default().to_owned()),
+        _ => Subject::None,
+    };
+    rule.matches(&Call {
+        tool,
+        family,
+        subject,
+    })
+}
+
 /// Commands that only read or build: run without asking.
 const SAFE: &[&str] = &[
     "ls",
