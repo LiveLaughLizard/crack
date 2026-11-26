@@ -1,4 +1,4 @@
-//! crack draws its own title bar: the icon, the tabs, a drag area with the project, and
+//! crack draws its own title bar: the icon, the tabs, an empty drag area, and
 //! the window buttons. On Linux it asks for client-side decorations and adds resize
 //! edges; on Windows the system title bar is hidden and the buttons map to the system's
 //! own areas (so snap layouts still work); macOS keeps its traffic lights.
@@ -55,22 +55,7 @@ impl CrackView {
             .flex_1()
             .min_w(px(40.))
             .h_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .px(px(12.))
-            .text_size(theme::SMALL_SIZE)
-            .text_color(theme::muted())
             .window_control_area(WindowControlArea::Drag)
-            .child(
-                div().truncate().child(
-                    self.ws
-                        .cwd
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| self.ws.short_cwd()),
-                ),
-            )
             .on_mouse_down(MouseButton::Left, |event, window, _| {
                 if event.click_count >= 2 {
                     window.zoom_window();
