@@ -794,7 +794,7 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
                 eprintln!("This air-gapped build doesn't update itself.");
                 return Ok(1);
             }
-            let http = reqwest::Client::new();
+            let http = workspace::http_client()?;
             match runtime::block_on(update::run(&http, check)) {
                 Ok(message) => {
                     println!("{message}");

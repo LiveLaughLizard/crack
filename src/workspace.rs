@@ -44,9 +44,7 @@ impl Workspace {
         let skills = Arc::new(skills::discover(&cwd, &config));
         let commands = Arc::new(crate::commands::discover(&cwd));
         let instructions = context::instructions(&cwd, &config);
-        let http = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(20))
-            .build()?;
+        let http = http_client()?;
         let mcp = McpHub::new(crate::mcp::configured(&cwd, &config), http.clone());
         Ok(Workspace {
             cwd,
@@ -234,3 +232,17 @@ then a blank line and a body explaining what changed and why, if that isn't obvi
 If nothing is staged, set `all: true` to commit the modified tracked files. If there are new untracked files \
 that clearly belong in the commit, say so instead of committing, since git_commit doesn't add new files.
 Don't change any files. The user approves the commit before it happens; if they deny it, ask what they'd like changed.";
+
+/// The HTTP client every request goes through. Building it fails when the system has
+/// no CA certificates (a bare container, say); say so instead of a bare "builder error".
+pub fn http_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "couldn't set up HTTPS ({error:#}). If the system has no CA certificates, \
+                 install them (e.g. the ca-certificates package)"
+            )
+        })
+}
