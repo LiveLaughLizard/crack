@@ -186,7 +186,7 @@ pub struct CrackView {
     /// Tool calls waiting for approval, by tab.
     pub(super) approvals: HashMap<u64, agent::ApprovalRequest>,
     /// For a file change waiting on approval: its hunks and which are ticked.
-    pub(super) review_hunks: HashMap<u64, (Vec<crate::review::Hunk>, Vec<bool>)>,
+    pub(super) review_hunks: HashMap<u64, ReviewHunks>,
     pub(super) approval_focus: gpui::FocusHandle,
     /// Move focus to the approval card on the next frame.
     pub(super) focus_approval: bool,
@@ -2340,15 +2340,36 @@ impl CrackView {
         }
         // File changes are shown hunk by hunk, each one ticked to start with.
         self.review_hunks.remove(&tab);
-        if matches!(request.tool.as_str(), "edit" | "write")
-            && let Some(proposal) =
-                crate::review::proposal(&request.tool, &request.input, &self.ws.cwd)
-        {
-            let hunks = crate::review::hunks(&proposal.old, &proposal.new);
-            if !hunks.is_empty() {
-                let ticked = vec![true; hunks.len()];
-                self.review_hunks.insert(tab, (hunks, ticked));
+        // Several files at once (review mode) are listed file by file.
+        let changes: Vec<(String, serde_json::Value)> = match request.tool.as_str() {
+            "edit" | "write" => vec![(request.tool.clone(), request.input.clone())],
+            "review_batch" => request.input["changes"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .map(|c| {
+                            (
+                                c["tool"].as_str().unwrap_or_default().to_owned(),
+                                c["input"].clone(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let mut hunks: Vec<(String, crate::review::Hunk)> = Vec::new();
+        for (tool, input) in &changes {
+            if let Some(proposal) = crate::review::proposal(tool, input, &self.ws.cwd) {
+                let path = input["path"].as_str().unwrap_or_default().to_owned();
+                for hunk in crate::review::hunks(&proposal.old, &proposal.new) {
+                    hunks.push((path.clone(), hunk));
+                }
             }
+        }
+        if !hunks.is_empty() {
+            let ticked = vec![true; hunks.len()];
+            self.review_hunks.insert(tab, (hunks, ticked));
         }
         self.approvals.insert(tab, request);
         cx.notify();
@@ -2595,3 +2616,6 @@ impl CrackView {
         .detach();
     }
 }
+
+/// A file change waiting on approval: each hunk with its file, and which are ticked.
+pub(super) type ReviewHunks = (Vec<(String, crate::review::Hunk)>, Vec<bool>);

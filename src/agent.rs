@@ -505,9 +505,10 @@ pub(crate) async fn turn_loop(
             blocked: bool,
             stop: Option<String>,
             outcome: Option<tools::ToolOutput>,
+            hook_permission: Option<crate::hooks::Permission>,
         }
         let mut prepared = Vec::new();
-        for (id, mut name, input) in calls {
+        for (id, name, input) in calls {
             let _ = events.send(AgentEvent::ToolCall {
                 id: id.clone(),
                 name: name.clone(),
@@ -527,22 +528,15 @@ pub(crate) async fn turn_loop(
             if let Some(updated) = &pre.updated_input {
                 input = crate::hooks::crack_input(updated);
             }
-            let (blocked, outcome) = if let Some(reason) = pre.block {
-                let refused = tools::ToolOutput::refused(
-                    format!("Blocked by a hook: {reason}"),
-                    tools::title(&name, &input),
-                );
-                (true, Some(refused))
-            } else {
-                match permit(config, &id, &name, &input, events, pre.permission).await {
-                    Ok(Some((tool, changed))) => {
-                        name = tool;
-                        input = changed;
-                        (false, None)
-                    }
-                    Ok(None) => (false, None),
-                    Err(refusal) => (false, Some(refusal)),
+            let (blocked, outcome) = match pre.block {
+                Some(reason) => {
+                    let refused = tools::ToolOutput::refused(
+                        format!("Blocked by a hook: {reason}"),
+                        tools::title(&name, &input),
+                    );
+                    (true, Some(refused))
                 }
+                None => (false, None),
             };
             prepared.push(Prepared {
                 id,
@@ -551,7 +545,53 @@ pub(crate) async fn turn_loop(
                 blocked,
                 stop: pre.stop,
                 outcome,
+                hook_permission: pre.permission,
             });
+        }
+        // Then permission. In review mode, file changes to different files are asked about
+        // together, hunk by hunk across all of them.
+        let batch = review_batch(
+            config,
+            &prepared
+                .iter()
+                .map(|p| (p.name.as_str(), &p.input, p.outcome.is_some()))
+                .collect::<Vec<_>>(),
+        );
+        if batch.len() >= 2 {
+            let items: Vec<(String, String, Value)> = batch
+                .iter()
+                .map(|&i| {
+                    (
+                        prepared[i].id.clone(),
+                        prepared[i].name.clone(),
+                        prepared[i].input.clone(),
+                    )
+                })
+                .collect();
+            let answers = permit_batch(config, &items, events).await;
+            for (&i, answer) in batch.iter().zip(answers) {
+                match answer {
+                    Ok(Some((tool, changed))) => {
+                        prepared[i].name = tool;
+                        prepared[i].input = changed;
+                    }
+                    Ok(None) => {}
+                    Err(refusal) => prepared[i].outcome = Some(refusal),
+                }
+            }
+        }
+        for (i, p) in prepared.iter_mut().enumerate() {
+            if p.outcome.is_some() || batch.len() >= 2 && batch.contains(&i) {
+                continue;
+            }
+            match permit(config, &p.id, &p.name, &p.input, events, p.hook_permission).await {
+                Ok(Some((tool, changed))) => {
+                    p.name = tool;
+                    p.input = changed;
+                }
+                Ok(None) => {}
+                Err(refusal) => p.outcome = Some(refusal),
+            }
         }
 
         // 2. Run them: subagents all at once (up to the limit), other tools in order.
@@ -911,6 +951,123 @@ async fn server_compact(
         .into_iter()
         .find(|p| matches!(p, Part::Compaction { .. }));
     Ok((block, completion.usage))
+}
+
+/// Review mode: the calls (by index) whose file changes are asked about together. Two
+/// or more edits or writes to different files qualify; when one file is changed twice,
+/// each is asked about on its own (the second applies on top of the first).
+fn review_batch(config: &TurnConfig, calls: &[(&str, &Value, bool)]) -> Vec<usize> {
+    use crate::policy::{Decision, Mode};
+    if config.policy.mode != Mode::Review || config.approvals.is_none() {
+        return Vec::new();
+    }
+    let rules = config.session_rules.lock().unwrap().clone();
+    let policy = config.policy.clone().with_session_rules(&rules);
+    let mut paths = Vec::new();
+    let mut batch = Vec::new();
+    for (i, (name, input, settled)) in calls.iter().enumerate() {
+        if *settled || !matches!(*name, "edit" | "write") {
+            continue;
+        }
+        if !matches!(policy.check(name, input), Decision::Ask(_)) {
+            continue;
+        }
+        let Some(proposal) = crate::review::proposal(name, input, &config.policy.cwd) else {
+            continue;
+        };
+        if paths.contains(&proposal.path) {
+            return Vec::new();
+        }
+        paths.push(proposal.path);
+        batch.push(i);
+    }
+    batch
+}
+
+/// Asks once about several file changes (review mode) and splits the answer: each
+/// change is applied whole, in part (only its ticked hunks) or not at all.
+async fn permit_batch(
+    config: &TurnConfig,
+    items: &[(String, String, Value)],
+    events: &Events,
+) -> Vec<Result<Option<(String, Value)>, tools::ToolOutput>> {
+    use crate::policy::Answer;
+    let refuse = |name: &str, input: &Value, text: &str| {
+        Err(tools::ToolOutput::refused(
+            text.to_owned(),
+            tools::title(name, input),
+        ))
+    };
+    let all = |text: &str| -> Vec<Result<Option<(String, Value)>, tools::ToolOutput>> {
+        items.iter().map(|(_, n, i)| refuse(n, i, text)).collect()
+    };
+    let Some(approvals) = &config.approvals else {
+        return all("This needs a person's approval, and this run can't ask.");
+    };
+    let reason = format!("review mode: {} file changes", items.len());
+    for (id, _, _) in items {
+        let _ = events.send(AgentEvent::Approval {
+            id: id.clone(),
+            reason: reason.clone(),
+        });
+    }
+    let changes: Vec<Value> = items
+        .iter()
+        .map(|(_, name, input)| json!({"tool": name, "input": input}))
+        .collect();
+    let (respond, answer) = tokio::sync::oneshot::channel();
+    let request = ApprovalRequest {
+        tool: "review_batch".into(),
+        input: json!({ "changes": changes }),
+        reason,
+        suggestion: String::new(),
+        respond,
+    };
+    if approvals.send(request).is_err() {
+        return all("Couldn't ask for approval; the window is gone.");
+    }
+    match answer.await {
+        Ok(Answer::Once) | Ok(Answer::Session(_)) | Ok(Answer::Always(_)) => {
+            items.iter().map(|_| Ok(None)).collect()
+        }
+        Ok(Answer::Deny(note)) => all(&match note {
+            Some(note) => format!("The user denied these changes: {note}"),
+            None => {
+                "The user denied these changes. Don't retry them; ask what they'd like instead."
+                    .into()
+            }
+        }),
+        Ok(Answer::Partial(ticks)) => {
+            let cwd = &config.policy.cwd;
+            let mut at = 0;
+            items
+                .iter()
+                .map(|(_, name, input)| {
+                    let Some(proposal) = crate::review::proposal(name, input, cwd) else {
+                        return Ok(None);
+                    };
+                    let n = crate::review::hunks(&proposal.old, &proposal.new).len();
+                    let mine: Vec<bool> = ticks.iter().skip(at).take(n).copied().collect();
+                    at += n;
+                    if mine.iter().all(|t| *t) {
+                        Ok(None)
+                    } else if !mine.iter().any(|t| *t) {
+                        refuse(
+                            name,
+                            input,
+                            "The user rejected this change. Don't redo it unless they ask.",
+                        )
+                    } else {
+                        Ok(Some((
+                            "write".to_owned(),
+                            crate::review::partial_input(&proposal, cwd, &mine),
+                        )))
+                    }
+                })
+                .collect()
+        }
+        Err(_) => all("The approval was cancelled."),
+    }
 }
 
 /// `task` and the team tools run concurrently (they may wait on subagents).

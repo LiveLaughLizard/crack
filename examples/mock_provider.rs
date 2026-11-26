@@ -186,11 +186,36 @@ fn scripted_step(first_user: Option<&str>, done: usize, last: Option<&str>) -> O
     let text = first_user?;
     let start = text.find("steps:")? + 6;
     let json = text[start..].lines().next()?.trim();
-    let steps: Vec<(String, Value)> = serde_json::from_str(json).ok()?;
-    Some(match steps.get(done) {
-        Some((name, input)) => Plan::Call {
-            name: name.clone(),
-            input: input.clone(),
+    // A step is ["tool", {args}], or a list of those to call together.
+    let steps: Vec<Value> = serde_json::from_str(json).ok()?;
+    let one = |v: &Value| -> Option<(String, Value)> {
+        Some((
+            v.get(0)?.as_str()?.to_owned(),
+            v.get(1).cloned().unwrap_or(json!({})),
+        ))
+    };
+    // Steps run so far: each multi-call step counts its calls.
+    let mut seen = 0;
+    let mut current = None;
+    for step in &steps {
+        let width = if step.get(0).is_some_and(Value::is_array) {
+            step.as_array().map_or(1, Vec::len)
+        } else {
+            1
+        };
+        if seen == done {
+            current = Some(step.clone());
+            break;
+        }
+        seen += width;
+    }
+    Some(match current {
+        Some(step) if step.get(0).is_some_and(Value::is_array) => {
+            Plan::Calls(step.as_array().unwrap().iter().filter_map(one).collect())
+        }
+        Some(step) => match one(&step) {
+            Some((name, input)) => Plan::Call { name, input },
+            None => return None,
         },
         None => Plan::Answer(format!(
             "Steps done. Last result:\n\n{}",

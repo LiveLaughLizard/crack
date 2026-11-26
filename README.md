@@ -608,7 +608,8 @@ bash  = "ask"             # or "allow" for commands on neither list
 - **Accept edits:** file edits in the project never ask.
 - **Review edits** (`/review`): every file change asks first, and the card shows it hunk
   by hunk. Untick the parts you don't want and press `p` (Apply selected); the model
-  is told exactly which changes landed and which were rejected.
+  is told exactly which changes landed and which were rejected. When the model changes
+  several files in one step, they come as one card, file by file.
 - **YOLO:** everything runs without asking, except deny rules. The mode shows in red
   in the prompt bar.
 

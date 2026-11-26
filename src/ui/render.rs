@@ -1949,6 +1949,7 @@ impl CrackView {
                 }
                 ("Write this file?", lines)
             }
+            "review_batch" => ("Make these changes?", Vec::new()),
             tool if tool.starts_with("mcp__") => (
                 "Use this MCP tool?",
                 vec![
@@ -2010,13 +2011,19 @@ impl CrackView {
                 .rounded(px(4.))
                 .px(px(12.))
                 .py(px(8.))
-                .text_size(theme::SMALL_SIZE)
-                .child(
-                    div()
-                        .text_color(theme::text_soft())
-                        .child(input["path"].as_str().unwrap_or_default().to_owned()),
-                );
-            for (i, hunk) in hunks.iter().enumerate().take(12) {
+                .text_size(theme::SMALL_SIZE);
+            let mut shown_path = String::new();
+            for (i, (path, hunk)) in hunks.iter().enumerate().take(30) {
+                // The file name above its first hunk.
+                if *path != shown_path {
+                    shown_path = path.clone();
+                    code = code.child(
+                        div()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme::text_soft())
+                            .child(path.clone()),
+                    );
+                }
                 let on = ticked.get(i).copied().unwrap_or(true);
                 let mut block = div().flex().flex_col().child(
                     div()
