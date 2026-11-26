@@ -270,7 +270,8 @@ impl CrackView {
         let input = cx.new(|cx| TextInput::new(true, format!("Ask anything… \"{pick}\""), cx));
         let subscription = cx.subscribe_in(&input, window, Self::on_input_event);
 
-        // A plain launch reopens last time's tabs; -s or a prompt starts fresh.
+        // A plain launch shows the start screen with recent sessions, or reopens last
+        // time's tabs with `reopen_tabs`; -s or a prompt starts fresh.
         let plain_launch = session_id.is_none() && prompt.is_none();
         let mut session = Session::new(&ws.cwd);
         let mut toast = None;
@@ -381,7 +382,7 @@ impl CrackView {
                 }
             }
         }
-        if plain_launch {
+        if plain_launch && view.ws.config.reopen_tabs == Some(true) {
             view.restore_tabs(cx);
         }
         if !repaired.is_empty() {

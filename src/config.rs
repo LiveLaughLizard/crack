@@ -44,6 +44,9 @@ pub struct Config {
     /// On Linux, install crack's icon and desktop entry under ~/.local/share so the
     /// window shows its icon (default true).
     pub desktop_integration: Option<bool>,
+    /// A plain launch reopens the tabs open at last quit, instead of the start
+    /// screen with recent sessions (default false).
+    pub reopen_tabs: Option<bool>,
     /// A SearXNG server for `websearch` (needs `format=json` enabled).
     pub searxng_url: Option<String>,
     /// Trim old tool output when the conversation fills this share of the context window
@@ -244,6 +247,9 @@ impl Config {
         }
         if layer.desktop_integration.is_some() {
             self.desktop_integration = layer.desktop_integration;
+        }
+        if layer.reopen_tabs.is_some() {
+            self.reopen_tabs = layer.reopen_tabs;
         }
         if layer.searxng_url.is_some() {
             self.searxng_url = layer.searxng_url;

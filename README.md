@@ -265,8 +265,9 @@ A new tab's start screen lists the project's five most recent sessions (pinned o
 first) above the prompt; click one, or press `alt-1` to `alt-5`, to pick it up where you
 left off.
 
-`crack -s last` reopens the latest session, and a plain launch reopens the tabs that
-were open when you last quit. Sessions saved as JSON by older versions are imported on
+`crack -s last` reopens the latest session. A plain launch opens the start screen,
+which lists your five most recent sessions to click (or alt-1…5); set
+`reopen_tabs = true` to reopen the tabs that were open when you last quit instead. Sessions saved as JSON by older versions are imported on
 first start; the old files are kept in `sessions.imported/`.
 
 **First run.** The start screen shows a short welcome: connect a provider, try a sample
