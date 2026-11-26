@@ -64,9 +64,11 @@ pub struct Config {
     pub max_parallel_agents: Option<usize>,
     /// How deep subagents may nest: 1 means only the main agent starts them (default 2).
     pub max_agent_depth: Option<u32>,
-    /// The model for `explore` and other "small" subagents (default: a smaller model
-    /// from the same provider).
-    pub subagent_model: Option<String>,
+    /// The model for `explore` and other agents whose model is "small" (default: a
+    /// smaller model from the same provider). Other subagents use the main model unless
+    /// their own file names one. `subagent_model` is the old name.
+    #[serde(alias = "subagent_model")]
+    pub explorer_model: Option<String>,
     /// Model requests a subagent may make (default 60).
     pub subagent_max_steps: Option<u32>,
     /// Project memory: `remember`/`recall` and reminders before each turn (default true).
@@ -272,8 +274,8 @@ impl Config {
         if layer.max_agent_depth.is_some() {
             self.max_agent_depth = layer.max_agent_depth;
         }
-        if layer.subagent_model.is_some() {
-            self.subagent_model = layer.subagent_model;
+        if layer.explorer_model.is_some() {
+            self.explorer_model = layer.explorer_model;
         }
         if layer.subagent_max_steps.is_some() {
             self.subagent_max_steps = layer.subagent_max_steps;
@@ -584,6 +586,21 @@ pub fn remove_user_mcp(name: &str) -> anyhow::Result<PathBuf> {
         table.remove(name);
     }
     std::fs::write(&path, doc.to_string())?;
+    Ok(path)
+}
+
+/// Removes a top-level key (and its old name) from the user's own config file.
+pub fn remove_user_top_value(keys: &[&str]) -> anyhow::Result<PathBuf> {
+    let path = global_dir()
+        .ok_or_else(|| anyhow::anyhow!("no config folder"))?
+        .join("config.toml");
+    let mut doc = read_doc(&path)?;
+    for key in keys {
+        doc.remove(key);
+    }
+    if path.exists() {
+        std::fs::write(&path, doc.to_string())?;
+    }
     Ok(path)
 }
 

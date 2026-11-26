@@ -129,7 +129,7 @@ impl Workspace {
                     self.registry.clone(),
                     &self.cwd,
                     model_ref.to_owned(),
-                    self.config.subagent_model.clone(),
+                    self.config.explorer_model.clone(),
                     self.instructions.clone(),
                     self.config.max_parallel_agents.unwrap_or(15),
                     self.config.subagent_max_steps.unwrap_or(60),

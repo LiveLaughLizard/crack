@@ -1506,7 +1506,7 @@ impl CrackView {
         cx.notify();
     }
 
-    fn model_items(&self) -> Vec<PickerItem> {
+    pub(super) fn model_items(&self) -> Vec<PickerItem> {
         let current = self.selection.model.clone().unwrap_or_default();
         let mut items = Vec::new();
         for recent in self.recent_models.iter().take(5) {

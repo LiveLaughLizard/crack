@@ -537,10 +537,15 @@ agent's state and latest activity; click one for its transcript.
 - **`fork`:** a copy of the main agent that continues from the conversation so far, on
   the same model, to take one branch of the work. Its prompt only needs the branch. A
   fork can't fork again.
-- **`explore`:** read-only codebase search. It uses a smaller, faster model from the
-  same provider (Haiku for Claude, a mini or flash model elsewhere), unless you set
-  `subagent_model`.
-- **`general`:** can do anything the main agent can, except start subagents.
+- **`explore`:** read-only codebase search. It runs on the explorer model: by default a
+  smaller, faster model from the same provider (Haiku for Claude, a mini or flash model
+  elsewhere). Pick another in Settings (`ctrl-,`, "Explorer model") or set
+  `explorer_model = "provider/model"` in the config.
+- **`general`:** can do anything the main agent can, except start subagents. It uses
+  the main agent's model.
+
+Only `explore`, and your own agents whose file says `model: small`, use the explorer
+model. Every other subagent runs on the main model unless its file names one.
 
 **Your own agents** are markdown files in `.crack/agents/`, `.claude/agents/` or
 `~/.config/crack/agents/`. Claude Code's agent files work as they are:
@@ -550,11 +555,15 @@ agent's state and latest activity; click one for its transcript.
 name: reviewer
 description: Reviews a diff for bugs. Use after making changes.
 tools: Read, Grep, Glob, git_diff
-model: haiku            # inherit (default), haiku/sonnet/opus, or provider/model
-isolation: worktree     # optional: edit in a separate git worktree
+model: haiku
+isolation: worktree
 ---
 You are a careful reviewer...
 ```
+
+`model` is optional. Leave it out (or write `inherit`) to use the main model, or use
+`small` for the explorer model, `haiku`, `sonnet` or `opus`, or any `provider/model`.
+`isolation` is optional too; see below.
 
 **In the transcript,** each subagent shows a live status line, and once finished it
 links to its full transcript, which opens read-only in a tab.

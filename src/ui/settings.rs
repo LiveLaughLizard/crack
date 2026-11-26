@@ -47,6 +47,16 @@ impl CrackView {
             ),
             item("font", "Font", theme::font().to_string(), false),
             item("effort", "Reasoning effort", effort, false),
+            item(
+                "explorer_model",
+                "Explorer model (explore subagents)",
+                self.ws
+                    .config
+                    .explorer_model
+                    .clone()
+                    .unwrap_or_else(|| "auto: a smaller model from the same provider".into()),
+                false,
+            ),
             item("mode", "Mode", self.selection.mode.label().into(), false),
             item(
                 "edits",
@@ -109,7 +119,8 @@ impl CrackView {
         for i in &mut items {
             i.category = Some(match i.id.as_str() {
                 "theme" | "font" => "Appearance".into(),
-                "effort" | "mode" | "server_compaction" | "clear_tool_results" => "Agent".into(),
+                "effort" | "explorer_model" | "mode" | "server_compaction"
+                | "clear_tool_results" => "Agent".into(),
                 _ => "Permissions".into(),
             });
         }
@@ -171,6 +182,27 @@ impl CrackView {
                     choice("allow", "Allow", now == "allow"),
                     choice("ask", "Ask first", now == "ask"),
                 ]
+            }
+            Some("explorer_model") => {
+                let now = self.ws.config.explorer_model.clone();
+                let mut list = vec![item(
+                    "auto",
+                    "Auto",
+                    "a smaller, faster model from the main model's provider".into(),
+                    now.is_none(),
+                )];
+                list.extend(
+                    self.model_items()
+                        .into_iter()
+                        .filter(|m| {
+                            m.category.as_deref() != Some("Recent") && !m.id.starts_with("connect:")
+                        })
+                        .map(|mut m| {
+                            m.current = now.as_deref() == Some(m.id.as_str());
+                            m
+                        }),
+                );
+                list
             }
             Some("bash") => {
                 let now = self.permission("bash");
@@ -244,6 +276,21 @@ impl CrackView {
                 "yolo" => self.set_mode(crate::policy::Mode::Yolo, cx),
                 _ => self.set_mode(crate::policy::Mode::Normal, cx),
             },
+            "explorer_model" => {
+                let saved = if value == "auto" {
+                    self.ws.config.explorer_model = None;
+                    crate::config::remove_user_top_value(&["explorer_model", "subagent_model"])
+                } else {
+                    self.ws.config.explorer_model = Some(value.to_owned());
+                    crate::config::remove_user_top_value(&["subagent_model"]).and_then(|_| {
+                        crate::config::set_user_top_value("explorer_model", value.into())
+                    })
+                };
+                match saved {
+                    Ok(path) => self.show_toast(format!("Saved to {}", path.display()), false, cx),
+                    Err(error) => self.show_toast(format!("Couldn't save: {error:#}"), true, cx),
+                }
+            }
             key @ ("edits" | "bash" | "webfetch") => {
                 let permissions = &mut self.ws.config.permissions;
                 let slot = match key {
