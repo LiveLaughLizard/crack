@@ -982,6 +982,17 @@ impl CrackView {
                     .await;
                 let _ = this.update(cx, |view, cx| {
                     view.team_tick = false;
+                    // Idle, and a subagent finished or asked something: let the model act on it.
+                    if view.running.is_none()
+                        && view.ws.config.wake_on_background.unwrap_or(true)
+                        && crate::delegate::needs_attention(&view.session.id)
+                    {
+                        view.start_turn(
+                            "Background work you started has news (below). Continue with it."
+                                .into(),
+                            cx,
+                        );
+                    }
                     cx.notify();
                 });
             })

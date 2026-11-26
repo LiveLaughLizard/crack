@@ -990,7 +990,7 @@ impl CrackView {
 
     // ---- Turns ----
 
-    fn start_turn(&mut self, text: String, cx: &mut Context<Self>) {
+    pub(super) fn start_turn(&mut self, text: String, cx: &mut Context<Self>) {
         if self.session.id.starts_with("sub-") {
             self.show_toast("This is a subagent's transcript, so it's read-only. Open a new tab (ctrl-x t) to keep working.", true, cx);
             return;

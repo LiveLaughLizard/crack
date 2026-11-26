@@ -331,6 +331,80 @@ pub fn stop_all() {
     teams.clear();
 }
 
+/// Only what's new since the main agent last heard (finished reports and new notes),
+/// merged into one message, for delivery between its model calls.
+pub fn news(session: &str) -> Option<String> {
+    let lines: Vec<String> = with_team(session, |team| {
+        team.iter()
+            .filter_map(|m| {
+                let mut i = lock(&m.info);
+                let notes = i.take_new_notes();
+                let finished = !i.state.busy() && !i.report_told;
+                if !finished && notes.is_empty() {
+                    return None;
+                }
+                let mut text = format!("- {} ({})", i.label(), i.state.label());
+                for note in notes {
+                    text.push_str(&format!("\n  [{}] {}", note.kind, note.text));
+                }
+                if finished {
+                    i.report_told = true;
+                    let preview: String = i.report.chars().take(1_500).collect();
+                    let more = if i.report.chars().count() > 1_500 {
+                        " [... the rest: agent_status]"
+                    } else {
+                        ""
+                    };
+                    text.push_str(&format!("\n  Report: {preview}{more}"));
+                }
+                Some(text)
+            })
+            .collect()
+    });
+    (!lines.is_empty()).then(|| {
+        format!(
+            "<subagent_updates>\nNews from your subagents:\n{}\n</subagent_updates>",
+            lines.join("\n")
+        )
+    })
+}
+
+/// Something the main agent should act on: a finished agent it hasn't heard about, or a
+/// question or blocker it hasn't seen. An idle window wakes for these.
+pub fn needs_attention(session: &str) -> bool {
+    with_team(session, |team| {
+        team.iter().any(|m| {
+            let i = lock(&m.info);
+            (!i.state.busy() && !i.report_told && !matches!(i.state, State::Stopped))
+                || i.notes[i.notes_told.min(i.notes.len())..]
+                    .iter()
+                    .any(|n| n.kind == "question" || n.kind == "blocked")
+        })
+    })
+}
+
+/// How many of a session's agents are still working.
+pub fn busy(session: &str) -> usize {
+    with_team(session, |team| {
+        team.iter().filter(|m| lock(&m.info).state.busy()).count()
+    })
+}
+
+/// Waits until any working agent changes (finishes or sends a note), or `timeout`.
+pub async fn wait_for_change(session: &str, timeout: Duration) {
+    let mut receivers: Vec<watch::Receiver<u64>> = with_team(session, |team| {
+        team.iter()
+            .filter(|m| lock(&m.info).state.busy())
+            .map(|m| m.changed.clone())
+            .collect()
+    });
+    if receivers.is_empty() {
+        return;
+    }
+    let waits = receivers.iter_mut().map(|rx| Box::pin(rx.changed()));
+    let _ = tokio::time::timeout(timeout, futures::future::select_all(waits)).await;
+}
+
 /// For the main agent before each turn: who's working, their new notes, and reports
 /// it hasn't seen.
 pub fn reminder(session: &str) -> Option<String> {

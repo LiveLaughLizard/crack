@@ -36,6 +36,11 @@ pub struct Config {
     pub trim_output: Option<bool>,
     /// Check GitHub once a day for a newer crack and say so (default false).
     pub update_check: Option<bool>,
+    /// Headless runs wait this long for subagents still working when a turn ends
+    /// (default 600 seconds).
+    pub background_wait_secs: Option<u64>,
+    /// An idle window starts a turn when a subagent finishes or asks something (default true).
+    pub wake_on_background: Option<bool>,
     /// A SearXNG server for `websearch` (needs `format=json` enabled).
     pub searxng_url: Option<String>,
     /// Trim old tool output when the conversation fills this share of the context window
@@ -225,6 +230,12 @@ impl Config {
         }
         if layer.update_check.is_some() {
             self.update_check = layer.update_check;
+        }
+        if layer.background_wait_secs.is_some() {
+            self.background_wait_secs = layer.background_wait_secs;
+        }
+        if layer.wake_on_background.is_some() {
+            self.wake_on_background = layer.wake_on_background;
         }
         if layer.searxng_url.is_some() {
             self.searxng_url = layer.searxng_url;

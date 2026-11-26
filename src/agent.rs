@@ -141,7 +141,7 @@ pub async fn run_turn(
     tools: ToolContext,
     events: Events,
     mut cancel: watch::Receiver<bool>,
-) {
+) -> Vec<Message> {
     let started = Instant::now();
     tracing::info!(model = %config.model_ref, agent = config.agent.name(), session = %tools.session_id, "turn started");
     let interrupted = tokio::select! {
@@ -207,6 +207,7 @@ pub async fn run_turn(
         interrupted,
         seconds: started.elapsed().as_secs_f32(),
     });
+    history
 }
 
 pub(crate) async fn turn_loop(
@@ -330,6 +331,27 @@ pub(crate) async fn turn_loop(
             let _ = events.send(AgentEvent::Notice(format!(
                 "Message from the main agent: {text}"
             )));
+        }
+        // The main agent: news from its subagents and background commands arrives between
+        // its steps, merged into one message (the turn's first step already has it).
+        if steps > 0 && config.subagents.is_some() {
+            let news: Vec<String> = [
+                crate::delegate::news(&ctx.session_id),
+                crate::background::news(&ctx.session_id),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !news.is_empty() {
+                let text = news.join("\n\n");
+                match history.last_mut() {
+                    Some(last) if last.role == Role::User => last.parts.push(Part::Text { text }),
+                    _ => history.push(Message::user_text(text)),
+                }
+                let _ = events.send(AgentEvent::Notice(
+                    "Updates from background work reached the model.".into(),
+                ));
+            }
         }
         // Trim old tool output first: it keeps the conversation itself, and one trim
         // costs one prompt-cache rewrite, so it runs in batches well before compacting.
@@ -485,6 +507,10 @@ pub(crate) async fn turn_loop(
         if calls.is_empty() {
             // A subagent with a message still to read isn't done yet.
             if config.team_link.as_ref().is_some_and(|l| l.has_messages()) {
+                continue;
+            }
+            // Likewise the main agent with a finished subagent or a question it hasn't seen.
+            if config.subagents.is_some() && crate::delegate::needs_attention(&ctx.session_id) {
                 continue;
             }
             // A Stop hook can send the model back to work (a few times at most).

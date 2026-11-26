@@ -456,6 +456,13 @@ the same time: up to `max_parallel_agents` (default 15) work at once, and the re
   `stop_agent` ends one.
 - Before each turn the main agent is told what's working, new notes, and reports it
   hasn't read.
+- Between its steps, finished reports, new notes and finished background commands reach
+  the main agent as one combined update, so it can react mid-turn. A finished agent or
+  a question that arrives as it wraps up keeps the turn going.
+- If the session is idle when a subagent finishes or asks something, the window starts a
+  turn so the main agent can act on it (`wake_on_background = false` turns this off).
+  Headless runs wait for subagents still working at the end of a turn and carry on with
+  their results, for up to `background_wait_secs` (default 600).
 
 An agent exits once it has no more work and has reported. A message that arrives as
 it finishes is handled first. The sidebar's Agents section lists the team with each

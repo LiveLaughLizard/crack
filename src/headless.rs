@@ -167,7 +167,54 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
         let (events_tx, mut events) = mpsc::unbounded_channel();
         let (cancel_tx, cancel) = watch::channel(false);
         let history = session.messages.clone();
-        let task = tokio::spawn(agent::run_turn(config, history, tools, events_tx, cancel));
+        // Subagents still working when the turn ends: wait for their news (up to
+        // background_wait_secs) and carry on with it, rather than exit with work in flight.
+        let ceiling =
+            std::time::Duration::from_secs(workspace.config.background_wait_secs.unwrap_or(600));
+        let team = session.id.clone();
+        let task = tokio::spawn(async move {
+            let mut history = agent::run_turn(
+                config.clone(),
+                history,
+                tools.clone(),
+                events_tx.clone(),
+                cancel.clone(),
+            )
+            .await;
+            let deadline = tokio::time::Instant::now() + ceiling;
+            while !*cancel.borrow() {
+                let attention = crate::delegate::needs_attention(&team);
+                let busy = crate::delegate::busy(&team);
+                if busy == 0 && !attention {
+                    break;
+                }
+                let now = tokio::time::Instant::now();
+                if now >= deadline {
+                    let _ = events_tx.send(AgentEvent::Notice(format!(
+                        "Stopping {busy} subagent(s) still working after {}s (background_wait_secs).",
+                        ceiling.as_secs()
+                    )));
+                    break;
+                }
+                if !attention {
+                    crate::delegate::wait_for_change(&team, deadline - now).await;
+                    continue;
+                }
+                let message = crate::providers::Message::user_text(
+                    "Background work you started has news (below). Continue the task with it.",
+                );
+                history.push(message.clone());
+                let _ = events_tx.send(AgentEvent::Message(message));
+                history = agent::run_turn(
+                    config.clone(),
+                    history,
+                    tools.clone(),
+                    events_tx.clone(),
+                    cancel.clone(),
+                )
+                .await;
+            }
+        });
 
         let format = options.format;
         let mut failed = false;

@@ -244,6 +244,29 @@ pub fn reminder(session: &str) -> Option<String> {
     })
 }
 
+/// Only what's new since the main agent last heard: shells that finished unseen. For
+/// delivery between its model calls.
+pub fn news(session: &str) -> Option<String> {
+    let mut lines = Vec::new();
+    for shell in shells().values_mut().filter(|s| s.session == session) {
+        if shell.status != Status::Running && !shell.reported {
+            shell.reported = true;
+            lines.push(format!(
+                "- {} {} (read its output with bash_output): {}",
+                shell.id,
+                describe(&shell.status),
+                shell.command
+            ));
+        }
+    }
+    (!lines.is_empty()).then(|| {
+        format!(
+            "<background_shells>\nBackground commands that finished:\n{}\n</background_shells>",
+            lines.join("\n")
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
