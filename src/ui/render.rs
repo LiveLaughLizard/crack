@@ -953,6 +953,24 @@ impl CrackView {
                                 this.copy_text(text.join("\n\n"), cx);
                             })),
                     )
+                    .child(
+                        div()
+                            .id(("branch", index))
+                            .pl(px(10.))
+                            .text_color(theme::muted())
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(theme::text()))
+                            .child("branch")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                // The turn this footer closes starts at the user message before it.
+                                let start = this.session.entries[..index]
+                                    .iter()
+                                    .rposition(|e| matches!(e, Entry::User { .. }));
+                                if let Some(start) = start {
+                                    this.branch_session(Some(start), window, cx);
+                                }
+                            })),
+                    )
                     .into_any_element()
             }
             Entry::Notice { text } => div()
@@ -1560,6 +1578,11 @@ impl Render for CrackView {
             .on_action(cx.listener(|this, _: &SelectTab7, w, cx| this.select_tab(6, w, cx)))
             .on_action(cx.listener(|this, _: &SelectTab8, w, cx| this.select_tab(7, w, cx)))
             .on_action(cx.listener(|this, _: &SelectTab9, w, cx| this.select_tab(8, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent1, w, cx| this.open_recent(0, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent2, w, cx| this.open_recent(1, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent3, w, cx| this.open_recent(2, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent4, w, cx| this.open_recent(3, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent5, w, cx| this.open_recent(4, w, cx)))
             .on_action(cx.listener(|this, _: &CommandPalette, window, cx| {
                 this.open_picker(PickerKind::Command, window, cx)
             }))
@@ -1684,7 +1707,7 @@ impl Render for CrackView {
             root = root.child(
                 div()
                     .absolute()
-                    .top(px(16.))
+                    .top(px(super::titlebar::HEIGHT + 12.))
                     .right(px(16.))
                     .max_w(px(480.))
                     .bg(theme::raised_high())
@@ -2364,9 +2387,20 @@ impl CrackView {
                     .child(
                         div()
                             .flex_none()
+                            .flex()
+                            .flex_row()
+                            .gap(px(12.))
                             .text_size(theme::SMALL_SIZE)
                             .text_color(theme::muted())
-                            .child(when),
+                            .when(s.pinned, |d| {
+                                d.child(div().text_color(theme::primary()).child("pinned"))
+                            })
+                            .child(when)
+                            .child(
+                                div()
+                                    .text_color(theme::text_soft())
+                                    .child(format!("alt-{}", i + 1)),
+                            ),
                     )
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.open_session(&id, window, cx)),

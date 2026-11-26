@@ -65,6 +65,16 @@ pub(super) const COMMANDS: &[(&str, &str, &[&str])] = &[
     ("reload", "Reload AGENTS.md, skills and config", &[]),
     ("copy", "Copy the last response", &[]),
     ("rename", "Rename the session: /rename <title>", &[]),
+    (
+        "pin",
+        "Pin or unpin this session (pinned ones list first)",
+        &["unpin"],
+    ),
+    (
+        "branch",
+        "Continue this conversation in a new tab, leaving this one as it is",
+        &["fork"],
+    ),
     ("cd", "Change the working directory: /cd <dir>", &[]),
     ("sidebar", "Toggle the sidebar", &[]),
     ("mcp", "MCP servers: status and reconnect", &["mcps"]),
@@ -863,6 +873,11 @@ impl CrackView {
                 self.show_toast(text, false, cx);
             }
             Some("copy") => self.copy_last(cx),
+            Some("pin") => {
+                let id = self.session.id.clone();
+                self.toggle_pin(&id, cx);
+            }
+            Some("branch") => self.branch_session(None, window, cx),
             Some("rename") => {
                 if !args.is_empty() {
                     self.session.title = args.to_owned();
@@ -1331,6 +1346,24 @@ impl CrackView {
                 self.delete_session(id, window, cx);
                 return;
             }
+            PickerEvent::TogglePin(id) => {
+                self.toggle_pin(id, cx);
+                // Re-list, keeping the picker open.
+                self.close_picker(window, cx);
+                self.open_picker(PickerKind::Session, window, cx);
+                return;
+            }
+            PickerEvent::Rename(id) => {
+                let id = id.clone();
+                self.close_picker(window, cx);
+                self.open_session(&id, window, cx);
+                let title = self.session.title.clone();
+                self.input.update(cx, |input, cx| {
+                    input.set_text(format!("/rename {title}"), cx)
+                });
+                self.focus_prompt(window, cx);
+                return;
+            }
             PickerEvent::Confirm(kind, id) => (*kind, id.clone()),
         };
         self.close_picker(window, cx);
@@ -1601,7 +1634,9 @@ impl CrackView {
         .into_iter()
         .collect();
         let group = |name: &str| match name {
-            "new" | "sessions" | "rename" | "copy" | "tab" | "close" => "Session",
+            "new" | "sessions" | "rename" | "pin" | "branch" | "copy" | "tab" | "close" => {
+                "Session"
+            }
             "settings" => "System",
             "models" | "effort" | "agents" | "connect" => "Agent",
             "skills" | "init" | "reload" | "cd" | "compact" | "undo" | "redo" | "diff"
@@ -1674,7 +1709,9 @@ fn session_picker_items(
             let when = chrono::DateTime::from_timestamp(s.updated, 0)
                 .map(|d| d.with_timezone(&chrono::Local))
                 .unwrap_or_else(chrono::Local::now);
-            let category = if when.date_naive() == today {
+            let category = if s.pinned {
+                "Pinned".to_owned()
+            } else if when.date_naive() == today {
                 "Today".to_owned()
             } else {
                 when.format("%a %b %d %Y").to_string()
@@ -2713,5 +2750,84 @@ impl CrackView {
             self.show_toast("Press ctrl-d again to close this tab.", false, cx);
         }
         cx.notify();
+    }
+}
+
+impl CrackView {
+    /// Pins a session, or unpins it if it's pinned.
+    pub(super) fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
+        // Save first, so a session that hasn't been written yet has a row to pin.
+        if self.session.id == id {
+            let _ = self.session.save();
+        }
+        let root = context::project_root(&self.ws.cwd);
+        let pinned = Session::list(&root).iter().any(|s| s.id == id && s.pinned);
+        crate::store::get().set_pinned(id, !pinned);
+        self.recent = None;
+        self.show_toast(
+            if pinned {
+                "Unpinned."
+            } else {
+                "Pinned: it lists first."
+            },
+            false,
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Continues this session in a new tab from the end of the turn starting at
+    /// transcript entry `turn` (or from the end), leaving this one as it is.
+    pub(super) fn branch_session(
+        &mut self,
+        turn: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.entries.is_empty() {
+            self.show_toast("Nothing to branch yet.", true, cx);
+            return;
+        }
+        let Some(mut branch) = self.session.branch(turn) else {
+            self.show_toast(
+                "This turn can't be branched from (it predates checkpoints).",
+                true,
+                cx,
+            );
+            return;
+        };
+        if let Err(error) = branch.save() {
+            self.show_toast(format!("Couldn't save the branch: {error:#}"), true, cx);
+            return;
+        }
+        self.new_tab(window, cx);
+        *self.todos.lock().unwrap() = branch.todos.clone();
+        self.session = branch;
+        self.follow = true;
+        self.recent = None;
+        self.show_toast(
+            "Branched into a new tab; the original is unchanged.",
+            false,
+            cx,
+        );
+        cx.notify();
+    }
+}
+
+impl CrackView {
+    /// alt-1..5 on the start screen: open that recent session.
+    pub(super) fn open_recent(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.session.is_empty() {
+            return;
+        }
+        if let Some(s) = self.recent_sessions().get(index) {
+            let id = s.id.clone();
+            self.open_session(&id, window, cx);
+        }
     }
 }

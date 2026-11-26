@@ -44,6 +44,8 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE VIRTUAL TABLE session_search USING fts5(session UNINDEXED, title, body);
     CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+    // 2: pinned sessions stay at the top of the lists.
+    "ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// A session row and the parts of it that changed since the last save.
@@ -89,12 +91,14 @@ pub struct SessionSummary {
     pub title: String,
     pub cwd: PathBuf,
     pub updated: i64,
+    pub pinned: bool,
 }
 
 enum Job {
     Save(Box<SessionWrite>),
     Delete(String),
     SetKv(String, String),
+    Pin(String, bool),
     Flush(mpsc::Sender<()>),
 }
 
@@ -195,6 +199,13 @@ impl Store {
                             )
                             .map(|_| ())
                             .map_err(Into::into),
+                        Job::Pin(id, pinned) => connection
+                            .execute(
+                                "UPDATE sessions SET pinned = ?2 WHERE id = ?1",
+                                params![id, pinned],
+                            )
+                            .map(|_| ())
+                            .map_err(Into::into),
                         Job::Flush(done) => {
                             let _ = done.send(());
                             Ok(())
@@ -227,6 +238,13 @@ impl Store {
 
     pub fn set_kv(&self, key: &str, value: String) {
         let _ = self.writer.send(Job::SetKv(key.to_owned(), value));
+    }
+
+    /// Pins or unpins a session (it then lists first). Waits for the write, so the next
+    /// listing shows it.
+    pub fn set_pinned(&self, id: &str, pinned: bool) {
+        let _ = self.writer.send(Job::Pin(id.to_owned(), pinned));
+        self.flush();
     }
 
     /// Waits until every queued write is on disk. Returns write errors since the last flush.
@@ -314,19 +332,20 @@ impl Store {
                 title: r.get(1)?,
                 cwd: PathBuf::from(r.get::<_, String>(2)?),
                 updated: r.get(3)?,
+                pinned: r.get::<_, i64>(4)? != 0,
             })
         };
         let result: rusqlite::Result<Vec<SessionSummary>> =
             match query.map(fts_query).filter(|q| !q.is_empty()) {
                 None => connection
                     .prepare(
-                        "SELECT id, title, cwd, updated FROM sessions
-                     WHERE project = ?1 OR cwd LIKE ?2 ESCAPE '\\' ORDER BY updated DESC",
+                        "SELECT id, title, cwd, updated, pinned FROM sessions
+                     WHERE project = ?1 OR cwd LIKE ?2 ESCAPE '\\' ORDER BY pinned DESC, updated DESC",
                     )
                     .and_then(|mut s| s.query_map(params![project, like], map)?.collect()),
                 Some(q) => connection
                     .prepare(
-                        "SELECT s.id, s.title, s.cwd, s.updated FROM session_search f
+                        "SELECT s.id, s.title, s.cwd, s.updated, s.pinned FROM session_search f
                      JOIN sessions s ON s.id = f.session
                      WHERE session_search MATCH ?3 AND (s.project = ?1 OR s.cwd LIKE ?2 ESCAPE '\\')
                      ORDER BY rank",
@@ -463,6 +482,133 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("crack-store-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A finished turn: the prompt, an answer, and its end.
+    fn turn(session: &mut Session, prompt: &str, answer: &str) {
+        session.push_user(prompt, prompt.into(), Agent::Build, None);
+        session.apply(
+            &AgentEvent::Message(Message::user_text(prompt)),
+            Agent::Build,
+            "m",
+        );
+        session.apply(&AgentEvent::Text(answer.into()), Agent::Build, "m");
+        session.apply(
+            &AgentEvent::Done {
+                interrupted: false,
+                seconds: 0.1,
+            },
+            Agent::Build,
+            "m",
+        );
+    }
+
+    #[test]
+    fn branches_keep_the_chosen_turns_and_leave_the_original() {
+        let dir = temp_dir();
+        let store = Store::open(&dir.join("crack.db")).unwrap();
+        let mut session = Session::new(&dir.join("project"));
+        turn(&mut session, "first", "one");
+        turn(&mut session, "second", "two");
+        turn(&mut session, "third", "three");
+        let starts: Vec<usize> = session
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, Entry::User { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(starts.len(), 3);
+
+        // From the end of the second turn: two prompts, two answers.
+        let mut branch = session.branch(Some(starts[1])).unwrap();
+        let users = |s: &Session| {
+            s.entries
+                .iter()
+                .filter_map(|e| match e {
+                    Entry::User { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(users(&branch), ["first", "second"]);
+        assert!(
+            branch
+                .entries
+                .iter()
+                .any(|e| matches!(e, Entry::Text { text } if text == "two"))
+        );
+        assert!(
+            !branch
+                .entries
+                .iter()
+                .any(|e| matches!(e, Entry::Text { text } if text == "three"))
+        );
+        assert_ne!(branch.id, session.id);
+        assert!(branch.title.ends_with("(branch)"));
+        // Its turns can be undone.
+        assert_eq!(branch.checkpoints.len(), 2);
+        // Branching a branch doesn't stack the suffix.
+        assert!(
+            !branch
+                .branch(None)
+                .unwrap()
+                .title
+                .ends_with("(branch) (branch)")
+        );
+
+        // It saves and loads on its own; the original keeps all three turns.
+        branch.save_to(&store);
+        assert!(store.flush().is_empty());
+        let loaded = Session::load_from(&store, &branch.id).unwrap();
+        assert_eq!(users(&loaded), ["first", "second"]);
+        assert_eq!(users(&session).len(), 3);
+        // The whole conversation, and a turn that isn't one, which can't be branched from.
+        assert_eq!(users(&session.branch(None).unwrap()).len(), 3);
+        assert!(session.branch(Some(starts[0] + 1)).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pinned_sessions_list_first_and_survive_saves() {
+        let dir = temp_dir();
+        let store = Store::open(&dir.join("crack.db")).unwrap();
+        let project = dir.join("project");
+        let mut old = Session::new(&project);
+        old.updated = 100;
+        turn(&mut old, "old one", "a");
+        old.updated = 100;
+        old.save_to(&store);
+        let mut new = Session::new(&project);
+        turn(&mut new, "new one", "b");
+        new.save_to(&store);
+        assert!(store.flush().is_empty());
+        let titles = |store: &Store| {
+            store
+                .list_sessions(&project, None)
+                .into_iter()
+                .map(|s| (s.title, s.pinned))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(&store),
+            [("new one".into(), false), ("old one".into(), false)]
+        );
+
+        store.set_pinned(&old.id, true);
+        assert_eq!(
+            titles(&store),
+            [("old one".into(), true), ("new one".into(), false)]
+        );
+        // Saving the session again (as every turn does) keeps the pin.
+        turn(&mut old, "more", "c");
+        old.save_to(&store);
+        assert!(store.flush().is_empty());
+        assert_eq!(titles(&store)[0], ("old one".into(), true));
+
+        store.set_pinned(&old.id, false);
+        assert!(titles(&store).iter().all(|(_, pinned)| !pinned));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

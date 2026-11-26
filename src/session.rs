@@ -142,6 +142,39 @@ impl Session {
         }
     }
 
+    /// A new session that continues this one from the end of the turn starting at
+    /// transcript entry `turn` (that turn and everything before it), or from the end
+    /// with `None`. The original is untouched.
+    pub fn branch(&self, turn: Option<usize>) -> Option<Session> {
+        let (messages, entries) = match turn {
+            None => (self.messages.len(), self.entries.len()),
+            Some(start) => {
+                // The turn ends where the next one begins.
+                let index = self.checkpoints.iter().position(|c| c.entries == start)?;
+                match self.checkpoints.get(index + 1) {
+                    Some(next) => (next.messages, next.entries),
+                    None => (self.messages.len(), self.entries.len()),
+                }
+            }
+        };
+        let mut branch = Session::new(&self.cwd);
+        branch.title = format!("{} (branch)", self.title.trim_end_matches(" (branch)"));
+        branch.messages = self.messages[..messages.min(self.messages.len())].to_vec();
+        branch.entries = self.entries[..entries.min(self.entries.len())].to_vec();
+        branch.model = self.model.clone();
+        branch.context_tokens = self.context_tokens;
+        branch.todos = self.todos.clone();
+        // Its turns can still be undone (the file snapshots are shared).
+        branch.checkpoints = self
+            .checkpoints
+            .iter()
+            .filter(|c| c.messages < messages)
+            .cloned()
+            .collect();
+        branch.checkpoints_dirty = !branch.checkpoints.is_empty();
+        Some(branch)
+    }
+
     /// Marks entry `index` (and everything after it) as needing a save.
     fn touch(&mut self, index: usize) {
         self.dirty_from = self.dirty_from.min(index);

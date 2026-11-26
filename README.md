@@ -252,9 +252,18 @@ They're listed per project. In the Sessions picker (`ctrl-x l`):
 
 - typing searches the conversations themselves, not just titles;
 - `ctrl-d` pressed twice deletes a session (in the main window it closes the tab).
+- `ctrl-p` pins or unpins a session (pinned ones list first, here and on the start
+  screen); `ctrl-r` opens it with `/rename <title>` ready in the prompt.
 
-A new tab's start screen lists the project's five most recent sessions above the
-prompt; click one to pick it up where you left off.
+`/rename <title>` renames the current session and `/pin` pins it. To try something
+different without losing what you have, click **branch** under any answer (or run
+`/branch` for the whole conversation): crack copies the conversation up to that point
+into a new session in a new tab, and the original stays as it was. Branched turns can
+still be undone.
+
+A new tab's start screen lists the project's five most recent sessions (pinned ones
+first) above the prompt; click one, or press `alt-1` to `alt-5`, to pick it up where you
+left off.
 
 `crack -s last` reopens the latest session, and a plain launch reopens the tabs that
 were open when you last quit. Sessions saved as JSON by older versions are imported on

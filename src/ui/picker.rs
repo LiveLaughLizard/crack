@@ -8,12 +8,14 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window, actions, div, px,
 };
 
-actions!(picker, [Dismiss, DeleteItem]);
+actions!(picker, [Dismiss, DeleteItem, TogglePin, RenameItem]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("escape", Dismiss, Some("Picker")),
         KeyBinding::new("ctrl-d", DeleteItem, Some("Picker")),
+        KeyBinding::new("ctrl-p", TogglePin, Some("Picker")),
+        KeyBinding::new("ctrl-r", RenameItem, Some("Picker")),
     ]);
 }
 
@@ -54,6 +56,10 @@ pub enum PickerKind {
 pub enum PickerEvent {
     /// Delete this item (sessions and memories); sent after a second ctrl-d.
     Delete(String),
+    /// Pin or unpin this session (ctrl-p in the Sessions picker).
+    TogglePin(String),
+    /// Rename this session (ctrl-r in the Sessions picker).
+    Rename(String),
     Confirm(PickerKind, String),
     Dismiss,
 }
@@ -352,6 +358,8 @@ impl Render for Picker {
             .key_context("Picker")
             .on_action(cx.listener(|_, _: &Dismiss, _, cx| cx.emit(PickerEvent::Dismiss)))
             .on_action(cx.listener(|this, _: &DeleteItem, _, cx| this.delete_selected(cx)))
+            .on_action(cx.listener(|this, _: &TogglePin, _, cx| this.session_action(true, cx)))
+            .on_action(cx.listener(|this, _: &RenameItem, _, cx| this.session_action(false, cx)))
             .w(px(if self.wide { 860. } else { 620. }))
             .max_w_full()
             .bg(theme::raised())
@@ -439,6 +447,22 @@ impl Picker {
         self.filtered = (0..self.items.len()).collect();
         self.selected = self.selected.min(self.items.len().saturating_sub(1));
         cx.notify();
+    }
+
+    /// ctrl-p (pin) or ctrl-r (rename) on the selected session.
+    fn session_action(&mut self, pin: bool, cx: &mut Context<Self>) {
+        if self.kind != PickerKind::Session {
+            return;
+        }
+        let Some(item) = self.filtered.get(self.selected).map(|i| &self.items[*i]) else {
+            return;
+        };
+        let id = item.id.clone();
+        cx.emit(if pin {
+            PickerEvent::TogglePin(id)
+        } else {
+            PickerEvent::Rename(id)
+        });
     }
 
     /// The first ctrl-d arms the selected item; a second one deletes it.
