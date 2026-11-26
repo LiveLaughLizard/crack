@@ -30,6 +30,8 @@ pub struct RunOptions {
     pub tools: Option<Vec<String>>,
     /// `last`, or a session id to continue.
     pub session: Option<String>,
+    /// Ask the program running crack about approvals, over stdin and stdout.
+    pub host_permissions: bool,
 }
 
 /// Reads the prompt from arguments and/or piped stdin. Piped input is appended to an
@@ -102,6 +104,9 @@ pub fn run(mut workspace: Workspace, options: RunOptions) -> anyhow::Result<i32>
         }
         let mut config = workspace.turn_config(&selection)?;
         config.max_steps = options.max_steps;
+        if options.host_permissions {
+            config.approvals = Some(host_approvals());
+        }
         let model_ref = selection.model.clone().unwrap_or_default();
 
         let mut session = match options.session.as_deref() {
@@ -410,4 +415,90 @@ fn stdin_ready(timeout: std::time::Duration) -> bool {
 #[cfg(not(unix))]
 fn stdin_ready(_timeout: std::time::Duration) -> bool {
     true
+}
+
+/// `--permission-prompt stdio`: approvals go to the program running crack. Each one is
+/// written to stdout as a line of JSON,
+/// `{"type":"permission_request","id":"p1","tool":…,"input":…,"reason":…,"suggestion":…}`,
+/// and answered with a line on stdin,
+/// `{"type":"permission_response","id":"p1","decision":"allow"|"allow_session"|"deny","message":…}`.
+/// Requests are answered in any order. If stdin closes, everything still waiting (and
+/// anything asked later) is denied.
+fn host_approvals() -> tokio::sync::mpsc::UnboundedSender<agent::ApprovalRequest> {
+    use std::collections::HashMap;
+    use std::io::BufRead;
+    type Pending = Arc<Mutex<Option<HashMap<String, agent::ApprovalRequest>>>>;
+    let pending: Pending = Arc::new(Mutex::new(Some(HashMap::new())));
+    let (tx, mut rx) = mpsc::unbounded_channel::<agent::ApprovalRequest>();
+
+    let reader = pending.clone();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            let Ok(reply) = serde_json::from_str::<serde_json::Value>(&line) else {
+                eprintln!("crack: ignoring a line on stdin that isn't JSON");
+                continue;
+            };
+            if reply["type"] != "permission_response" {
+                continue;
+            }
+            let id = reply["id"].as_str().unwrap_or_default();
+            let request = reader
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+                .and_then(|p| p.remove(id));
+            let Some(request) = request else {
+                eprintln!("crack: no permission request '{id}' is waiting");
+                continue;
+            };
+            let message = reply["message"].as_str().map(str::to_owned);
+            let answer = match reply["decision"].as_str() {
+                Some("allow") => crate::policy::Answer::Once,
+                Some("allow_session") => crate::policy::Answer::Session(request.suggestion.clone()),
+                _ => crate::policy::Answer::Deny(message),
+            };
+            let _ = request.respond.send(answer);
+        }
+        // The host is gone: nothing more can be approved.
+        if let Some(waiting) = reader.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            for (_, request) in waiting {
+                let _ = request.respond.send(crate::policy::Answer::Deny(Some(
+                    "The permission host closed stdin.".into(),
+                )));
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut next = 0u64;
+        while let Some(request) = rx.recv().await {
+            next += 1;
+            let id = format!("p{next}");
+            let line = serde_json::json!({
+                "type": "permission_request",
+                "id": id,
+                "tool": request.tool,
+                "input": request.input,
+                "reason": request.reason,
+                "suggestion": request.suggestion,
+            });
+            let mut guard = pending.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
+                Some(waiting) => {
+                    waiting.insert(id, request);
+                    drop(guard);
+                    let mut out = std::io::stdout().lock();
+                    let _ = writeln!(out, "{line}");
+                    let _ = out.flush();
+                }
+                None => {
+                    let _ = request.respond.send(crate::policy::Answer::Deny(Some(
+                        "The permission host closed stdin.".into(),
+                    )));
+                }
+            }
+        }
+    });
+    tx
 }

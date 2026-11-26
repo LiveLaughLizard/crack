@@ -770,6 +770,31 @@ one event per line: `text`, `thinking`, `tool_call`, `tool_result`, `usage`,
 Piped stdin is added to the prompt when it arrives within a second; put `-` among the
 arguments to wait for it however long it takes (`slow-cmd | crack run - "summarize"`).
 
+When subagents are still working at the end of a turn, the run waits for them and carries
+on with their results (up to `background_wait_secs`, default 600) instead of exiting
+with work in flight.
+
+### Answering permission prompts from another program
+
+By default a headless run refuses anything that would need your approval. With
+`--permission-prompt stdio` (and `--format json`), the program running crack answers
+instead. Each approval appears on stdout as a JSON line among the other events:
+
+```json
+{"type":"permission_request","id":"p1","tool":"bash","input":{"command":"make deploy"},"reason":"…","suggestion":"Bash(make deploy)"}
+```
+
+Reply with a line on crack's stdin, in any order:
+
+```json
+{"type":"permission_response","id":"p1","decision":"allow"}
+```
+
+`decision` is `allow` (this call), `allow_session` (calls matching `suggestion` for
+the rest of the run) or `deny`, with an optional `message` the model sees. The prompt
+must come from the arguments, since stdin carries the answers. If stdin closes, every
+request still waiting, and any asked afterwards, is denied.
+
 ```yaml
 # GitHub Actions
 - run: crack run --format json "Update the docs for the API changes in this PR" | tee crack.jsonl

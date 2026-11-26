@@ -71,6 +71,7 @@ enum Mode {
         log: Option<String>,
         /// Image files to attach to the prompt.
         images: Vec<std::path::PathBuf>,
+        host_permissions: bool,
     },
     Models {
         common: Common,
@@ -265,6 +266,9 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                     } else {
                         "normal (default: refuse what would need approval) or accept-edits"
                     }),
+                    Flag::choice("permission-prompt", &["stdio"]).usage(
+                        "Ask the program running crack about approvals: JSON requests on stdout, answers on stdin (needs --format json)",
+                    ),
                     Flag::choice("sandbox", &["on", "off"]).usage(if cfg!(feature = "force-sandbox") {
                         "This build always sandboxes shell commands"
                     } else {
@@ -304,6 +308,12 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                         Some(value) => Some(value == "on"),
                         None => None,
                     };
+                    let host_permissions = ctx.flag("permission-prompt").is_some();
+                    if host_permissions && format != headless::Format::Json {
+                        return Err(flag_rs::Error::Validation(
+                            "--permission-prompt stdio needs --format json".into(),
+                        ));
+                    }
                     set(
                         &run_mode,
                         Mode::Run {
@@ -327,6 +337,7 @@ fn build_cli(mode: Arc<Mutex<Option<Mode>>>) -> flag_rs::Command {
                                 .flag("image")
                                 .map(|v| v.split(',').filter(|s| !s.trim().is_empty()).map(|s| s.trim().into()).collect())
                                 .unwrap_or_default(),
+                            host_permissions,
                         },
                     );
                     Ok(())
@@ -619,13 +630,22 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
             sandbox,
             log: _,
             images,
+            host_permissions,
         } => {
             if let Some(on) = sandbox {
                 policy::override_sandbox(on);
             }
             let (workspace, mut selection) = load_workspace(&common)?;
             selection.mode = permission_mode;
-            let prompt = headless::gather_prompt(&prompt_args)?;
+            // With a permission host, stdin carries its answers, not the prompt.
+            let prompt = if host_permissions {
+                prompt_args.join(" ")
+            } else {
+                headless::gather_prompt(&prompt_args)?
+            };
+            if prompt.trim().is_empty() {
+                anyhow::bail!("no prompt given");
+            }
             headless::run(
                 workspace,
                 headless::RunOptions {
@@ -637,6 +657,7 @@ fn dispatch(mode: Mode, cli: &flag_rs::Command) -> anyhow::Result<i32> {
                     tools,
                     session: common.session,
                     images,
+                    host_permissions,
                 },
             )
         }
