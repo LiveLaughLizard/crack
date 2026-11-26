@@ -1889,6 +1889,8 @@ impl CrackView {
     /// Takes the active tab's state out of the view, leaving a blank one in place.
     fn stash_active(&mut self, cx: &mut Context<Self>) -> TabState {
         let draft = self.input.read(cx).text().to_owned();
+        // The list being stashed goes with its tab; the fresh one belongs to no session yet.
+        self.transcript_for = (String::new(), 0);
         TabState {
             session: std::mem::replace(&mut self.session, Session::new(&self.ws.cwd)),
             running: self.running.take(),
@@ -1912,6 +1914,8 @@ impl CrackView {
         self.expanded = tab.expanded;
         self.follow = tab.follow;
         self.scroll = tab.scroll;
+        // The restored list was built for this tab's session.
+        self.transcript_for = (self.session.id.clone(), self.scroll.item_count());
         self.esc_armed = tab.esc_armed;
         self.autocomplete.clear();
         let draft = tab.draft;

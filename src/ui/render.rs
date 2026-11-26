@@ -1003,12 +1003,14 @@ impl CrackView {
         }
         // Keep the list in step with the session: a different session (or a shorter one,
         // after a rewind) starts over; new entries are added at the end.
+        // The row count comes from the list itself, so a list swapped in from another tab (or
+        // a fresh one) is never mistaken for being up to date.
         let count = self.session.entries.len();
-        let (for_session, had) = &self.transcript_for;
-        if *for_session != self.session.id || count < *had {
+        let had = self.scroll.item_count();
+        if self.transcript_for.0 != self.session.id || count < had {
             self.scroll.reset(count);
-        } else if count > *had {
-            self.scroll.splice(*had..*had, count - had);
+        } else if count > had {
+            self.scroll.splice(had..had, count - had);
         }
         self.transcript_for = (self.session.id.clone(), count);
         if self.follow && count > 0 {
