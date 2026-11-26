@@ -13,11 +13,17 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+#[allow(dead_code)] // The end-to-end tests include this file and use `serve`.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let addr = std::env::var("MOCK_ADDR").unwrap_or_else(|_| "127.0.0.1:8765".into());
     let listener = TcpListener::bind(&addr).await?;
     eprintln!("mock provider on http://{addr}");
+    serve(listener).await
+}
+
+/// Answers requests on `listener` until it fails.
+pub async fn serve(listener: TcpListener) -> anyhow::Result<()> {
     loop {
         let (mut socket, _) = listener.accept().await?;
         tokio::spawn(async move {
