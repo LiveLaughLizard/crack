@@ -57,6 +57,8 @@ on your PATH. To get a launcher entry, copy `share/` into `~/.local/share/`.
 There is also an AppImage per build type (`crack-<version>-<build>-<arch>.AppImage`):
 `chmod +x` it and run it. It carries its own copies of the window libraries but uses
 your system's graphics driver.
+AppImageUpdate and AppImageLauncher can update it in place (it carries its update
+information), and so can `crack update`.
 
 There are also macOS (Apple Silicon) `.tar.gz` and Windows `.zip` downloads of the
 default build. They're built and tested in CI but not yet on real machines. On macOS,

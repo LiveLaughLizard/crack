@@ -73,6 +73,7 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.AppImage
+            dist/*.zsync
           if-no-files-found: error
 
   build-other:
@@ -165,6 +166,7 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.AppImage
+            dist/*.zsync
             dist/*.zip
             dist/SHA256SUMS
             dist/SHA256SUMS.minisig

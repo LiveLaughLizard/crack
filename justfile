@@ -154,10 +154,16 @@ appimage flavor="default":
         [ -n "$path" ] && extra+=(--library "$path")
     done
     mkdir -p dist
+    # Update information (and a .zsync next to the image), so AppImageUpdate and
+    # AppImageLauncher can update it from GitHub Releases.
+    update="gh-releases-zsync|LiveLaughLizard|crack|latest|crack-*-{{flavor}}-$arch.AppImage.zsync"
     APPIMAGE_EXTRACT_AND_RUN=1 ARCH=$arch LDAI_OUTPUT="dist/crack-{{version}}-{{flavor}}-$arch.AppImage" \
+        LDAI_UPDATE_INFORMATION="$update" UPDATE_INFORMATION="$update" \
         "$tool" --appdir "$appdir" --executable "$bin" \
         --desktop-file packaging/crack.desktop --icon-file assets/icon-512.png --icon-filename crack \
         "${extra[@]}" --output appimage
+    # The .zsync lands in the current folder; it ships next to the image.
+    mv -f "crack-{{version}}-{{flavor}}-$arch.AppImage.zsync" dist/ 2>/dev/null || true
     echo "dist/crack-{{version}}-{{flavor}}-$arch.AppImage"
 
 # Build the Nix package (all providers); `just package airgap` for another flavor
