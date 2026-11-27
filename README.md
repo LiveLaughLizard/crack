@@ -156,10 +156,23 @@ Environment variables work too, which suits CI. The model is `provider/model`:
 | Qwen (Alibaba Cloud Model Studio) | `qwen` | `DASHSCOPE_API_KEY`; China region: `DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1` |
 | Kimi (Moonshot AI) | `kimi` | `MOONSHOT_API_KEY`; China: `MOONSHOT_BASE_URL=https://api.moonshot.cn/v1` |
 | Z.ai / Zhipu (GLM) | `zai` | `ZAI_API_KEY` (or `ZHIPUAI_API_KEY`); China: `ZAI_BASE_URL=https://open.bigmodel.cn/api/paas/v4` |
-| MiniMax | `minimax` | `MINIMAX_API_KEY`; China: `MINIMAX_BASE_URL=https://api.minimax.cn/v1` |
+| MiniMax | `minimax` | `MINIMAX_API_KEY`; China: `MINIMAX_BASE_URL=https://api.minimaxi.com/v1` |
 | DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` |
 | Ollama, LM Studio | `ollama`, `lmstudio` | none; used when the server answers on its default port (`OLLAMA_HOST` to change) |
 | Any OpenAI-compatible server (vLLM, llama.cpp, LiteLLM, TGI…) | `custom` | `CRACK_BASE_URL` (e.g. `http://gpu-box:8000/v1`), optional `CRACK_API_KEY` |
+
+**Coding plans.** Subscription coding plans work with the plan's own key and endpoint.
+In the connect dialog, pick the plan's Region button:
+
+| Plan | Provider | Base URL |
+|---|---|---|
+| Z.ai GLM Coding Plan | `zai` | `https://api.z.ai/api/coding/paas/v4` |
+| Kimi Code | `kimi` | `https://api.kimi.ai/coding/v1` (China: `https://api.kimi.com/coding/v1`), model `kimi-for-coding` |
+| Alibaba Model Studio Coding Plan | `qwen` | `https://coding-intl.dashscope.aliyuncs.com/v1` (China: `https://coding.dashscope.aliyuncs.com/v1`), `sk-sp-` key |
+| MiniMax Coding Plan | `minimax` | the normal MiniMax URL with the plan's key |
+
+Without the dialog, set the provider's `*_BASE_URL` variable to the plan URL. ChatGPT,
+Copilot and Claude subscriptions can't be used; those need an API key.
 
 OpenAI-compatible servers are asked for their model list (`GET /models`). `crack
 providers` shows what's configured and `crack models` lists every usable model.

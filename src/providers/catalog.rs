@@ -414,7 +414,9 @@ fn china_entry(id: &str) -> Option<Entry> {
         "qwen" => Entry {
             group: Group::China,
             blurb: "Qwen models on Alibaba Cloud Model Studio (DashScope). Keys only work in \
-                    the region that created them.",
+                    the region that created them. Coding Plan subscribers: pick a Coding Plan \
+                    region and use the plan's sk-sp- key; set the models to the ones your plan \
+                    lists.",
             links: vec![
                 (
                     "Create an API key",
@@ -438,12 +440,21 @@ fn china_entry(id: &str) -> Option<Entry> {
                     "China (Beijing)",
                     "https://dashscope.aliyuncs.com/compatible-mode/v1",
                 ),
+                (
+                    "Coding Plan",
+                    "https://coding-intl.dashscope.aliyuncs.com/v1",
+                ),
+                (
+                    "Coding Plan (China)",
+                    "https://coding.dashscope.aliyuncs.com/v1",
+                ),
             ],
         },
         "kimi" => Entry {
             group: Group::China,
             blurb: "Kimi models from Moonshot AI. The international (.ai) and China (.cn) \
-                    platforms have separate accounts and keys.",
+                    platforms have separate accounts and keys. Kimi Code members: pick a \
+                    Kimi Code region and use a Kimi Code key; the model is kimi-for-coding.",
             links: vec![
                 (
                     "API keys (international)",
@@ -453,12 +464,15 @@ fn china_entry(id: &str) -> Option<Entry> {
                     "API keys (China)",
                     "https://platform.kimi.com/console/api-keys",
                 ),
+                ("Kimi Code", "https://www.kimi.com/code"),
             ],
             fields: fields("A key from the platform matching the region above."),
             sign_in: None,
             regions: vec![
                 ("International", "https://api.moonshot.ai/v1"),
                 ("China", "https://api.moonshot.cn/v1"),
+                ("Kimi Code", "https://api.kimi.ai/coding/v1"),
+                ("Kimi Code (China)", "https://api.kimi.com/coding/v1"),
             ],
         },
         "zai" => Entry {
@@ -482,8 +496,9 @@ fn china_entry(id: &str) -> Option<Entry> {
         },
         "minimax" => Entry {
             group: Group::China,
-            blurb: "MiniMax M-series models. The international (.io) and China (.cn) \
-                    platforms have separate keys.",
+            blurb: "MiniMax M-series models. The international (.io) and China (minimaxi.com) \
+                    platforms have separate keys. Coding Plan subscribers: use the plan's key \
+                    with the same region.",
             links: vec![
                 (
                     "API keys (international)",
@@ -491,14 +506,14 @@ fn china_entry(id: &str) -> Option<Entry> {
                 ),
                 (
                     "API keys (China)",
-                    "https://platform.minimax.cn/user-center/basic-information/interface-key",
+                    "https://platform.minimaxi.com/user-center/basic-information/interface-key",
                 ),
             ],
             fields: fields("A key from the platform matching the region above."),
             sign_in: None,
             regions: vec![
                 ("International", "https://api.minimax.io/v1"),
-                ("China", "https://api.minimax.cn/v1"),
+                ("China", "https://api.minimaxi.com/v1"),
             ],
         },
         "deepseek" => Entry {
