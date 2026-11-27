@@ -881,13 +881,19 @@ impl Render for ProvidersDialog {
                 .map(|(_, input)| input.clone());
             if let (false, Some(base_input)) = (form.entry.regions.is_empty(), base_input) {
                 let current = base_input.read(cx).text().trim().to_owned();
-                let mut toggles = div().flex().flex_row().items_center().gap(px(8.)).child(
-                    div()
-                        .text_size(theme::SMALL_SIZE)
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme::text_soft())
-                        .child("Region"),
-                );
+                let mut toggles = div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(theme::SMALL_SIZE)
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(theme::text_soft())
+                            .child("Region"),
+                    );
                 for (i, (label, url)) in form.entry.regions.iter().enumerate() {
                     let active = current == *url || (current.is_empty() && i == 0);
                     let input = base_input.clone();
